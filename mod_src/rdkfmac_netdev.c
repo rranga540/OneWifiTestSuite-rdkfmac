@@ -845,12 +845,16 @@ static void push_frame_to_char_dev(void *data, unsigned int len)
 	return;
 }
 
+static bool mac80211_hwsim_addr_match(struct mac80211_rdkfmac_data *data,
+					const u8 *addr);
+
 static netdev_tx_t hwsim_mon_xmit(struct sk_buff *skb,
 					struct net_device *dev)
 {
 		struct ethhdr *eth_hdr;
 	struct mac80211_rdkfmac_data *nic;
 	u32 freq = 2462;
+	struct ieee80211_hdr *hdr;
 
 		eth_hdr = (struct ethhdr *)skb_mac_header(skb);
 
@@ -865,6 +869,8 @@ static netdev_tx_t hwsim_mon_xmit(struct sk_buff *skb,
 		skb_pull(skb, ieee80211_get_radiotap_len(skb->data));
 	}
 
+	hdr = (void *)skb->data;
+
 	skb_orphan(skb);
 	spin_lock(&hwsim_radio_lock);
 	list_for_each_entry(nic, &hwsim_radios, list) {
@@ -872,6 +878,22 @@ static netdev_tx_t hwsim_mon_xmit(struct sk_buff *skb,
 		struct ieee80211_rx_status rx_status = {0};
 		if(nic->idle || !nic->started || !nic->channel)
 		continue;
+		/* Loop prevention: don't deliver a frame back to the radio that
+		 * transmitted it, otherwise it re-receives its own TX, mac80211
+		 * forwards it and send_data_frame() re-broadcasts it -> runaway 9002
+		 * flood. Only the wrapped 802.11 frames (9001 mgmt / 9002 data) have a
+		 * valid 802.11 header here. The addr1 (destination) check keeps
+		 * intra-radio delivery working when an AP VAP and a STA VAP live on the
+		 * same radio (e.g. EAPOL M2 STA->AP), so the 4-way handshake still
+		 * completes. EAPOL (0x888e) and other ethertypes are left untouched. */
+		if ((ntohs(eth_hdr->h_proto) == 9001 || ntohs(eth_hdr->h_proto) == 9002) &&
+			mac80211_hwsim_addr_match(nic, hdr->addr2) &&
+			!mac80211_hwsim_addr_match(nic, hdr->addr1)) {
+			printk("RDKFMAC loop-guard: dropped self-TX proto 0x%04x %pM->%pM on radio %pM\n",
+				ntohs(eth_hdr->h_proto), hdr->addr2, hdr->addr1,
+				nic->addresses[1].addr);
+			continue;
+		}
 		nskb = skb_copy(skb, GFP_ATOMIC);
 		if(nskb == NULL)
 		continue;
