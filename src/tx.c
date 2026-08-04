@@ -1650,6 +1650,8 @@ static bool ieee80211_tx_frags(struct ieee80211_local *local,
 		control.sta = sta;
 
 		__skb_unlink(skb, skbs);
+		printk("RDKFMAC TX9002 ieee80211_tx_frags: vif=%pM, sta=%pM, skbs=%d\n",
+		       vif->addr, sta ? sta->sta.addr : NULL, skb_queue_len(skbs));
 		drv_tx(local, &control, skb);
 	}
 
@@ -1711,7 +1713,7 @@ static bool __ieee80211_tx(struct ieee80211_local *local,
 		vif = &sdata->vif;
 		break;
 	}
-
+    printk("RDKFMAC TX9002 ieee80211_tx: vif=%pM, sta=%pM, skbs=%d\n", vif->addr, sta ? sta->sta.addr : NULL, skb_queue_len(skbs));
 	result = ieee80211_tx_frags(local, vif, pubsta, skbs,
 					txpending);
 
@@ -1928,12 +1930,17 @@ static bool ieee80211_tx(struct ieee80211_sub_if_data *sdata,
 		/* path B (brlan0) blocked; mac80211_hwsim_tx_frame_no_nl delivers locally */
 	}
 
-	if (ieee80211_queue_skb(local, sdata, tx.sta, tx.skb))
+	if (ieee80211_queue_skb(local, sdata, tx.sta, tx.skb)) {
+        printk("RDKFMAC ieee80211_queue_skb queued %pM->%pM len=%u\n",
+			hdr->addr2, hdr->addr1, skb->len);
 		return true;
+	}
 
-	if (!invoke_tx_handlers_late(&tx))
-		result = __ieee80211_tx(local, &tx.skbs, led_len,
-					tx.sta, txpending);
+	if (!invoke_tx_handlers_late(&tx)) {
+		printk("RDKFMAC ieee80211_tx invoke_tx_handlers_late %pM->%pM len=%u\n",
+			hdr->addr2, hdr->addr1, skb->len);
+		result = __ieee80211_tx(local, &tx.skbs, tx.sta, txpending);
+	}
 
 	return result;
 }
