@@ -1819,6 +1819,17 @@ int send_data_frame(void *buff, uint32_t frame_size, struct ieee80211_hw *hw)
 	uint8_t mac_addr[ETH_ALEN] = {0xe8, 0xd8, 0xd1, 0x33, 0xbb, 0x46};
 	static int rssi, noise;
 	struct mac80211_rdkfmac_data *rdkfmac_data = hw->priv;
+	struct ieee80211_hdr *h = (struct ieee80211_hdr *)buff;
+
+	printk("RDKFMAC TX9002 %pM->%pM len=%u\n", h->addr2, h->addr1, frame_size);
+
+	/* never re-inject air frames (addr1/addr3 = medium MAC = echo) */
+	if (ether_addr_equal(h->addr1, mac_addr) ||
+	    ether_addr_equal(h->addr3, mac_addr)) {
+		printk("RDKFMAC TX9002 drop echo (a1=%pM a3=%pM)\n",
+			h->addr1, h->addr3);
+		return 1;
+	}
 
 	dev = dev_get_by_name(&init_net, rdkfmac_data->bridge_name);
 	if (dev == NULL ) {
@@ -1899,6 +1910,21 @@ static bool ieee80211_tx(struct ieee80211_sub_if_data *sdata,
 	hdr = (void *)tx.skb->data;
 	if (ieee80211_is_data_qos(hdr->frame_control) &&
 		!ieee80211_is_qos_nullfunc(hdr->frame_control)) {
+		int hlen = ieee80211_hdrlen(hdr->frame_control);
+		u8 *p = (u8 *)hdr;
+
+		/* decode EAPOL M1-M4 and TX flags to spot retransmits */
+		if (skb->len >= hlen + 15 &&
+			p[hlen + 6] == 0x88 && p[hlen + 7] == 0x8e) {
+			u16 ki = (p[hlen + 13] << 8) | p[hlen + 14];
+			const char *m = !(ki & 0x0100) ? ((ki & 0x0080) ? "M1" : "?") :
+					(ki & 0x0080) ? "M3" :
+					(ki & 0x0200) ? "M4" : "M2";
+
+			printk("RDKFMAC EAPOL %s key_info=0x%04x flags=0x%08x %pM->%pM\n",
+				m, ki, info->flags, hdr->addr2, hdr->addr1);
+		}
+
 		send_data_frame(skb->data, skb->len, &local->hw);
 	}
 
@@ -3558,6 +3584,18 @@ void __ieee80211_subif_start_xmit(struct sk_buff *skb,
 	if (unlikely(skb->len < ETH_HLEN)) {
 		kfree_skb(skb);
 		return;
+	}
+
+	/* drop emulator air frames the bridge floods back; re-xmit loops and grows the frame */
+	{
+		static const u8 emu_medium_mac[ETH_ALEN] =
+			{ 0xe8, 0xd8, 0xd1, 0x33, 0xbb, 0x46 };
+		u16 et = (skb->data[12] << 8) | skb->data[13];
+		if (ether_addr_equal(skb->data, emu_medium_mac) ||
+		    et == 9001 || et == 9002) {
+			kfree_skb(skb);
+			return;
+		}
 	}
 
 	rcu_read_lock();

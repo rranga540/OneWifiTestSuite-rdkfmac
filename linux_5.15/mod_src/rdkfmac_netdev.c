@@ -1893,6 +1893,10 @@ static void mac80211_hwsim_tx(struct ieee80211_hw *hw,
 	data->tx_bytes += skb->len;
 	ack = mac80211_hwsim_tx_frame_no_nl(hw, skb, channel);
 
+	/* brlan0 is lossless; cross-box unicast never matches a local radio so report delivered */
+	if (!is_multicast_ether_addr(hdr->addr1))
+		ack = true;
+
 	if (ack && skb->len >= 16)
 		mac80211_hwsim_monitor_ack(channel, hdr->addr2);
 
