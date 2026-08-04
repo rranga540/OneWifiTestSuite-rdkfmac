@@ -1387,7 +1387,8 @@ static bool mac80211_hwsim_tx_frame_no_nl(struct ieee80211_hw *hw,
 			.channel = chan,
 		};
 
-		if (data == data2)
+		/* same hardware: still deliver if a local VIF matches addr1 */
+		if (data == data2 && !mac80211_hwsim_addr_match(data2, hdr->addr1))
 			continue;
 
 		if (!data2->started || (data2->idle && !data2->tmp_chan) ||
