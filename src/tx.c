@@ -1921,11 +1921,11 @@ static bool ieee80211_tx(struct ieee80211_sub_if_data *sdata,
 					(ki & 0x0080) ? "M3" :
 					(ki & 0x0200) ? "M4" : "M2";
 
-			printk("RDKFMAC EAPOL %s key_info=0x%04x flags=0x%08x %pM->%pM\n",
+			printk("RDKFMAC EAPOL %s key_info=0x%04x flags=0x%08x %pM->%pM PathB-suppressed\n",
 				m, ki, info->flags, hdr->addr2, hdr->addr1);
 		}
 
-		send_data_frame(skb->data, skb->len, &local->hw);
+		/* path B (brlan0) blocked; mac80211_hwsim_tx_frame_no_nl delivers locally */
 	}
 
 	if (ieee80211_queue_skb(local, sdata, tx.sta, tx.skb))

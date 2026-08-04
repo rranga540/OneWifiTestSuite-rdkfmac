@@ -1520,8 +1520,11 @@ static bool mac80211_hwsim_tx_frame_no_nl(struct ieee80211_hw *hw,
 		if (!nskb)
 			continue;
 
-		if (mac80211_hwsim_addr_match(data2, hdr->addr1))
+		if (mac80211_hwsim_addr_match(data2, hdr->addr1)) {
 			ack = true;
+			if (ieee80211_is_data(hdr->frame_control))
+				printk("RDKFMAC PathA %pM->%pM\n", hdr->addr2, hdr->addr1);
+		}
 
 		rx_status.mactime = now + data2->tsf_offset;
 
