@@ -1932,8 +1932,6 @@ static bool ieee80211_tx(struct ieee80211_sub_if_data *sdata,
 		}
 
 		/* path B (brlan0) blocked; mac80211_hwsim_tx_frame_no_nl delivers locally */
-	} else {
-		return true;
 	}
 
 	if (ieee80211_queue_skb(local, sdata, tx.sta, tx.skb)) {
