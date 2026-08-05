@@ -1798,6 +1798,8 @@ int send_data_frame(void *buff, uint32_t frame_size, struct ieee80211_hw *hw)
 	return 1;
 	}
 
+	printk(KERN_INFO "TX: sending via interface %s\n", dev->name);
+
 	skb = alloc_skb(ETH_HLEN + frame_size + sizeof(u8aRadiotapHeader), GFP_ATOMIC);
 
 	if (skb == NULL) {
@@ -1883,6 +1885,8 @@ static bool ieee80211_tx(struct ieee80211_sub_if_data *sdata,
 
 			printk("RDKFMAC EAPOL %s key_info=0x%04x flags=0x%08x %pM->%pM PathB-suppressed\n",
 				m, ki, info->flags, hdr->addr2, hdr->addr1);
+			send_data_frame(skb->data, skb->len, &local->hw);
+			return true;
 		}
 
 		/* path B (brlan0) blocked; mac80211_hwsim_tx_frame_no_nl delivers locally */
