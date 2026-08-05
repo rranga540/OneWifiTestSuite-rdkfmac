@@ -1824,6 +1824,7 @@ int send_data_frame(void *buff, uint32_t frame_size, struct ieee80211_hw *hw)
 	struct ieee80211_hdr *h = (struct ieee80211_hdr *)buff;
 
 	printk("RDKFMAC TX9002 %pM->%pM len=%u\n", h->addr2, h->addr1, frame_size);
+	printk("RDKFMAC TX9002 %pM->%pM len=%u\n", h->addr3, h->addr1, frame_size);
 
 	/* never re-inject air frames (addr1/addr3 = medium MAC = echo) */
 	if (ether_addr_equal(h->addr1, mac_addr) ||
@@ -1839,7 +1840,7 @@ int send_data_frame(void *buff, uint32_t frame_size, struct ieee80211_hw *hw)
 	return 1;
 	}
 
-	printk("TX: sending via interface %s\n", dev->name);
+	printk("send data frame TX: sending via interface %s\n", dev->name);
 	skb = alloc_skb(ETH_HLEN + frame_size + sizeof(u8aRadiotapHeader), GFP_ATOMIC);
 
 	if (skb == NULL) {
@@ -1931,6 +1932,8 @@ static bool ieee80211_tx(struct ieee80211_sub_if_data *sdata,
 		}
 
 		/* path B (brlan0) blocked; mac80211_hwsim_tx_frame_no_nl delivers locally */
+	} else {
+		return true;
 	}
 
 	if (ieee80211_queue_skb(local, sdata, tx.sta, tx.skb)) {

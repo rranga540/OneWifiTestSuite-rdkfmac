@@ -1644,7 +1644,7 @@ int send_eth_frame(void *frame, uint32_t frame_size, struct mac80211_rdkfmac_dat
 		printk("no such device eth0\n");
 		return 1;
 	}
-	printk(KERN_INFO "TX: sending via interface %s\n", dev->name);
+	printk("TX: sending via interface %s\n", dev->name);
 
 	hdr = (void *)frame;
 	if (ieee80211_is_auth(hdr->frame_control) && rdkfmac_data->auth_req) {
