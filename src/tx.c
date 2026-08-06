@@ -1902,6 +1902,18 @@ static bool ieee80211_tx(struct ieee80211_sub_if_data *sdata,
 		return true;
 	}
 
+	printk("TX: skb=%p protocol=0x%04x dev=%s len=%u\n",
+       skb,
+       ntohs(skb->protocol),
+       skb->dev ? skb->dev->name : "NULL",
+       skb->len);
+	
+	if (skb->protocol == htons(0x9002)) {
+    printk("Dropping self-injected packet\n");
+    ieee80211_free_txskb(&local->hw, skb);
+    return true;
+}
+
 	/* set up hw_queue value early */
 	if (!(info->flags & IEEE80211_TX_CTL_TX_OFFCHAN) ||
 		!ieee80211_hw_check(&local->hw, QUEUE_CONTROL))
@@ -1946,6 +1958,7 @@ static bool ieee80211_tx(struct ieee80211_sub_if_data *sdata,
 		result = __ieee80211_tx(local, &tx.skbs, tx.sta, txpending);
 	}
 
+	printk("RDKFMAC value of result is %d\n", result);
 	return result;
 }
 

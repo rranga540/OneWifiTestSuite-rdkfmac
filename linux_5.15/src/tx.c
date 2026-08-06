@@ -1837,7 +1837,7 @@ int send_data_frame(void *buff, uint32_t frame_size, struct ieee80211_hw *hw)
  */
 static bool ieee80211_tx(struct ieee80211_sub_if_data *sdata,
 			 struct sta_info *sta, struct sk_buff *skb,
-			 bool txpending)
+			 bool txpending, u32 txdata_flags)
 {
 	struct ieee80211_local *local = sdata->local;
 	struct ieee80211_tx_data tx;
@@ -1845,6 +1845,7 @@ static bool ieee80211_tx(struct ieee80211_sub_if_data *sdata,
 	struct ieee80211_tx_info *info = IEEE80211_SKB_CB(skb);
 	struct ieee80211_hdr *hdr;
 	bool result = true;
+	int led_len;
 
 	if (unlikely(skb->len < 10)) {
 		dev_kfree_skb(skb);
@@ -1852,7 +1853,10 @@ static bool ieee80211_tx(struct ieee80211_sub_if_data *sdata,
 	}
 
 	/* initialises tx */
+	led_len = skb->len;
 	res_prepare = ieee80211_tx_prepare(sdata, &tx, sta, skb);
+
+	tx.flags |= txdata_flags;
 
 	if (unlikely(res_prepare == TX_DROP)) {
 		ieee80211_free_txskb(&local->hw, skb);
@@ -1861,9 +1865,21 @@ static bool ieee80211_tx(struct ieee80211_sub_if_data *sdata,
 		return true;
 	}
 
+	printk("TX: skb=%p protocol=0x%04x dev=%s len=%u\n",
+       skb,
+       ntohs(skb->protocol),
+       skb->dev ? skb->dev->name : "NULL",
+       skb->len);
+	
+	if (skb->protocol == htons(0x9002)) {
+    printk("Dropping self-injected packet\n");
+    ieee80211_free_txskb(&local->hw, skb);
+    return true;
+}
+
 	/* set up hw_queue value early */
 	if (!(info->flags & IEEE80211_TX_CTL_TX_OFFCHAN) ||
-	    !ieee80211_hw_check(&local->hw, QUEUE_CONTROL))
+		!ieee80211_hw_check(&local->hw, QUEUE_CONTROL))
 		info->hw_queue =
 			sdata->vif.hw_queue[skb_get_queue_mapping(skb)];
 
@@ -1905,6 +1921,7 @@ static bool ieee80211_tx(struct ieee80211_sub_if_data *sdata,
 		result = __ieee80211_tx(local, &tx.skbs, tx.sta, txpending);
 	}
 
+	printk("RDKFMAC value of result is %d\n", result);
 	return result;
 }
 
