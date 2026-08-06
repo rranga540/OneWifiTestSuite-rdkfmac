@@ -1772,6 +1772,8 @@ int send_eth_frame_hook(void *frame, uint32_t frame_size, struct mac80211_rdkfma
 	return 0;
 }
 
+extern int send_data_frame(void *buff, uint32_t frame_size, struct ieee80211_hw *hw);
+
 static void mac80211_hwsim_tx(struct ieee80211_hw *hw,
 				struct ieee80211_tx_control *control,
 				struct sk_buff *skb)
@@ -1898,9 +1900,15 @@ static void mac80211_hwsim_tx(struct ieee80211_hw *hw,
 	data->tx_bytes += skb->len;
 	ack = mac80211_hwsim_tx_frame_no_nl(hw, skb, channel);
 
-	/* brlan0 is lossless; cross-box unicast never matches a local radio so report delivered */
 	if (!is_multicast_ether_addr(hdr->addr1))
 		ack = true;
+
+	/* local peer: Path A (tx_frame_no_nl) delivered; cross-box: forward via brlan0 */
+	if (ieee80211_is_data(hdr->frame_control) &&
+	    !is_multicast_ether_addr(hdr->addr1) &&
+	    !mac80211_hwsim_addr_match(data, hdr->addr1) &&
+	    !txi->control.hw_key)
+		send_data_frame(skb->data, skb->len, hw);
 
 	if (ack && skb->len >= 16)
 		mac80211_hwsim_monitor_ack(channel, hdr->addr2);

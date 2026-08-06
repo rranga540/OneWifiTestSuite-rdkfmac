@@ -1924,27 +1924,6 @@ static bool ieee80211_tx(struct ieee80211_sub_if_data *sdata,
 		return true;
 
 	hdr = (void *)tx.skb->data;
-	if (ieee80211_is_data_qos(hdr->frame_control) &&
-		!ieee80211_is_qos_nullfunc(hdr->frame_control)) {
-		int hlen = ieee80211_hdrlen(hdr->frame_control);
-		u8 *p = (u8 *)hdr;
-
-		/* decode EAPOL M1-M4 and TX flags to spot retransmits */
-		if (skb->len >= hlen + 15 &&
-			p[hlen + 6] == 0x88 && p[hlen + 7] == 0x8e) {
-			u16 ki = (p[hlen + 13] << 8) | p[hlen + 14];
-			const char *m = !(ki & 0x0100) ? ((ki & 0x0080) ? "M1" : "?") :
-					(ki & 0x0080) ? "M3" :
-					(ki & 0x0200) ? "M4" : "M2";
-
-			printk("RDKFMAC EAPOL %s key_info=0x%04x flags=0x%08x %pM->%pM PathB-suppressed\n",
-				m, ki, info->flags, hdr->addr2, hdr->addr1);
-			send_data_frame(skb->data, skb->len, &local->hw);
-			return true;
-		}
-
-		/* path B (brlan0) blocked; mac80211_hwsim_tx_frame_no_nl delivers locally */
-	}
 
 	if (ieee80211_queue_skb(local, sdata, tx.sta, tx.skb)) {
         printk("RDKFMAC ieee80211_queue_skb queued %pM->%pM len=%u\n",
