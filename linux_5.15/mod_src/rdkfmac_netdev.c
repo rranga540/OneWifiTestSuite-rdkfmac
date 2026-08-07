@@ -1494,8 +1494,9 @@ static bool mac80211_hwsim_tx_frame_no_nl(struct ieee80211_hw *hw,
 			.channel = chan,
 		};
 
-		/* same hardware: still deliver if a local VIF matches addr1 */
-		if (data == data2 && !mac80211_hwsim_addr_match(data2, hdr->addr1))
+		/* unicast: only deliver to the hardware whose VIF owns addr1 */
+		if (!is_multicast_ether_addr(hdr->addr1) &&
+		    !mac80211_hwsim_addr_match(data2, hdr->addr1))
 			continue;
 
 		if (!data2->started || (data2->idle && !data2->tmp_chan) ||
