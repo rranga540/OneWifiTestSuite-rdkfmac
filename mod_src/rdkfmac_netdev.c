@@ -1770,13 +1770,10 @@ static void mac80211_hwsim_tx(struct ieee80211_hw *hw,
 	data->tx_bytes += skb->len;
 	ack = mac80211_hwsim_tx_frame_no_nl(hw, skb, channel);
 
-	if (!is_multicast_ether_addr(hdr->addr1))
-		ack = true;
-
-	/* forward EAPOL cross-box only; avoids re-injecting regular data that would loop */
-	if (ieee80211_is_data(hdr->frame_control) &&
+	/* forward EAPOL cross-box only; skip if Path A already delivered (ack=true) */
+	if (!ack &&
+	    ieee80211_is_data(hdr->frame_control) &&
 	    !is_multicast_ether_addr(hdr->addr1) &&
-	    !mac80211_hwsim_addr_match(data, hdr->addr1) &&
 	    !txi->control.hw_key) {
 		int _hlen = ieee80211_hdrlen(hdr->frame_control);
 		u8 *_p = (u8 *)hdr;
@@ -1784,6 +1781,9 @@ static void mac80211_hwsim_tx(struct ieee80211_hw *hw,
 		    _p[_hlen + 6] == 0x88 && _p[_hlen + 7] == 0x8e)
 			send_data_frame(skb->data, skb->len, hw);
 	}
+
+	if (!is_multicast_ether_addr(hdr->addr1))
+		ack = true;
 
 	if (ack && skb->len >= 16)
 		mac80211_hwsim_monitor_ack(channel, hdr->addr2);
