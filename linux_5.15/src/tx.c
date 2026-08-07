@@ -1855,7 +1855,7 @@ static bool ieee80211_tx(struct ieee80211_sub_if_data *sdata,
                ntohs(skb->protocol), skb->dev ? skb->dev->name : "NULL",
                skb->len);
 
-        if (skb->protocol == htons(0x9002)) {
+        if (skb->protocol == htons(0x9002) || skb->protocol == htons(0x886c)) {
           printk("Dropping self-injected packet\n");
           ieee80211_free_txskb(&local->hw, skb);
           return true;
@@ -3742,7 +3742,7 @@ void __ieee80211_subif_start_xmit(struct sk_buff *skb,
 			{ 0xe8, 0xd8, 0xd1, 0x33, 0xbb, 0x46 };
 		u16 et = (skb->data[12] << 8) | skb->data[13];
 		if (ether_addr_equal(skb->data, emu_medium_mac) ||
-		    et == 9001 || et == 9002) {
+		    et == 9001 || et == 9002 || et == 0x886c) {
 			kfree_skb(skb);
 			return;
 		}
