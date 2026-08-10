@@ -1627,8 +1627,6 @@ static bool ieee80211_tx_frags(struct ieee80211_local *local,
 		control.sta = sta ? &sta->sta : NULL;
 
 		__skb_unlink(skb, skbs);
-		printk("RDKFMAC TX9002 ieee80211_tx_frags: vif=%pM, sta=%pM, skbs=%d\n",
-		       vif->addr, sta ? sta->sta.addr : NULL, skb_queue_len(skbs));
 		drv_tx(local, &control, skb);
 	}
 
@@ -1682,7 +1680,7 @@ static bool __ieee80211_tx(struct ieee80211_local *local,
 		vif = &sdata->vif;
 		break;
 	}
-    printk("RDKFMAC TX9002 ieee80211_tx: vif=%pM, sta=%pM, skbs=%d\n", vif->addr, sta ? sta->sta.addr : NULL, skb_queue_len(skbs));
+
 	result = ieee80211_tx_frags(local, vif, sta, skbs, txpending);
 
 	WARN_ON_ONCE(!skb_queue_empty(skbs));
@@ -1780,26 +1778,12 @@ int send_data_frame(void *buff, uint32_t frame_size, struct ieee80211_hw *hw)
 	uint8_t mac_addr[ETH_ALEN] = {0xe8, 0xd8, 0xd1, 0x33, 0xbb, 0x46};
 	static int rssi, noise;
 	struct mac80211_rdkfmac_data *rdkfmac_data = hw->priv;
-	struct ieee80211_hdr *h = (struct ieee80211_hdr *)buff;
-
-	printk("RDKFMAC TX9002 %pM->%pM len=%u\n", h->addr2, h->addr1, frame_size);
-	printk("RDKFMAC TX9002 %pM->%pM len=%u\n", h->addr3, h->addr1, frame_size);
-
-	/* never re-inject air frames (addr1/addr3 = medium MAC = echo) */
-	if (ether_addr_equal(h->addr1, mac_addr) ||
-	    ether_addr_equal(h->addr3, mac_addr)) {
-		printk("RDKFMAC TX9002 drop echo (a1=%pM a3=%pM)\n",
-			h->addr1, h->addr3);
-		return 1;
-	}
 
 	dev = dev_get_by_name(&init_net, rdkfmac_data->bridge_name);
 	if (dev == NULL ) {
 	printk("no such device eth0\n");
 	return 1;
 	}
-
-	printk("send data frame TX: sending via interface %s\n", dev->name);
 
 	skb = alloc_skb(ETH_HLEN + frame_size + sizeof(u8aRadiotapHeader), GFP_ATOMIC);
 
@@ -1851,15 +1835,11 @@ static bool ieee80211_tx(struct ieee80211_sub_if_data *sdata,
 		return true;
 	}
 
-        printk("TX: skb=%p protocol=0x%04x dev=%s len=%u\n", skb,
-               ntohs(skb->protocol), skb->dev ? skb->dev->name : "NULL",
-               skb->len);
-
-        if (skb->protocol == htons(0x9002) || skb->protocol == htons(0x886c)) {
-          printk("Dropping self-injected packet\n");
-          ieee80211_free_txskb(&local->hw, skb);
-          return true;
-        }
+    if (skb->protocol == htons(0x9002) || skb->protocol == htons(0x886c)) {
+        printk("Dropping self-injected packet\n");
+        ieee80211_free_txskb(&local->hw, skb);
+        return true;
+    }
 
         /* initialises tx */
 	res_prepare = ieee80211_tx_prepare(sdata, &tx, sta, skb);
@@ -1882,19 +1862,12 @@ static bool ieee80211_tx(struct ieee80211_sub_if_data *sdata,
 
 	hdr = (void *)tx.skb->data;
 
-	if (ieee80211_queue_skb(local, sdata, tx.sta, tx.skb)) {
-		printk("RDKFMAC ieee80211_queue_skb queued %pM->%pM len=%u\n",
-		       hdr->addr2, hdr->addr1, skb->len);
+	if (ieee80211_queue_skb(local, sdata, tx.sta, tx.skb))
 		return true;
-	}
 
-	if (!invoke_tx_handlers_late(&tx)) {
-		printk("RDKFMAC ieee80211_tx invoke_tx_handlers_late %pM->%pM len=%u\n",
-		       hdr->addr2, hdr->addr1, skb->len);
+	if (!invoke_tx_handlers_late(&tx))
 		result = __ieee80211_tx(local, &tx.skbs, tx.sta, txpending);
-	}
 
-	printk("RDKFMAC value of result is %d\n", result);
 	return result;
 }
 
