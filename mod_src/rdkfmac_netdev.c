@@ -1,7 +1,3 @@
-/* Modifications Copyright 2025 Comcast Cable Communications Management, LLC
- * Licensed under the GPLv2.0 License
- */
-
 #include <linux/list.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
@@ -54,11 +50,6 @@
 
 #define WARN_QUEUE 100
 #define MAX_QUEUE 200
-
-int max_sim_clients = 3;
-module_param(max_sim_clients, int, 0644);
-MODULE_PARM_DESC(max_sim_clients,
-                 "Number of simulated clients initialized by rdkfmac");
 
 static int channels = 1;
 
@@ -627,9 +618,6 @@ static void handle_frame_probe_req(struct ieee80211_mgmt *probe_req, unsigned in
 
 static void handle_frame_probe_resp(struct ieee80211_mgmt *probe_resp, unsigned int probe_resp_len) {
 	wlan_emu_msg_data_t *add_probe_resp_msg;
-	u8 *ies_start;
-	u8 *pos;
-	size_t ies_len;
 
 	add_probe_resp_msg = kzalloc(sizeof(wlan_emu_msg_data_t), GFP_KERNEL);
 	if (!add_probe_resp_msg) {
@@ -645,29 +633,6 @@ static void handle_frame_probe_resp(struct ieee80211_mgmt *probe_resp, unsigned 
 		memcpy(add_probe_resp_msg->u.frm80211.u.frame.frame, probe_resp, probe_resp_len);
 		memcpy(add_probe_resp_msg->u.frm80211.u.frame.macaddr, probe_resp->bssid, ETH_ALEN);
 		memcpy(add_probe_resp_msg->u.frm80211.u.frame.client_macaddr, probe_resp->da, ETH_ALEN);
-		ies_start = probe_resp->u.beacon.variable;
-                ies_len = probe_resp_len - (ies_start - (u8 *)probe_resp);
-                pos = ies_start;
-                while (pos + 1 < ies_start + ies_len) {
-                        u8 element_id = pos[0];
-                        u8 element_len = pos[1];
-
-                        if (pos + 2 + element_len > ies_start + ies_len) {
-                        // Element extends beyond the end of the frame, handle error
-                                break;
-                        }
-
-                        if (element_id == WLAN_EID_SSID) {
-                                // Found the SSID
-                                if (element_len >= 32) {
-                                        element_len = 32; // Truncate if somehow longer than spec allows
-                                }
-                                                memcpy(add_probe_resp_msg->u.frm80211.u.frame.ssid, (const char *)(pos + 2), element_len);
-                                                add_probe_resp_msg->u.frm80211.u.frame.ssid_len = element_len;
-						break;
-                        }
-
-                }
 		push_to_char_device(add_probe_resp_msg);
 	}
 
@@ -1387,9 +1352,7 @@ static bool mac80211_hwsim_tx_frame_no_nl(struct ieee80211_hw *hw,
 			.channel = chan,
 		};
 
-		/* unicast: only deliver to the hardware whose VIF owns addr1 */
-		if (!is_multicast_ether_addr(hdr->addr1) &&
-		    !mac80211_hwsim_addr_match(data2, hdr->addr1))
+		if (data == data2)
 			continue;
 
 		if (!data2->started || (data2->idle && !data2->tmp_chan) ||
@@ -1415,11 +1378,8 @@ static bool mac80211_hwsim_tx_frame_no_nl(struct ieee80211_hw *hw,
 		if (!nskb)
 			continue;
 
-		if (mac80211_hwsim_addr_match(data2, hdr->addr1)) {
+		if (mac80211_hwsim_addr_match(data2, hdr->addr1))
 			ack = true;
-			if (ieee80211_is_data(hdr->frame_control))
-				printk("RDKFMAC PathA %pM->%pM\n", hdr->addr2, hdr->addr1);
-		}
 
 		rx_status.mactime = now + data2->tsf_offset;
 
@@ -1673,8 +1633,6 @@ int send_eth_frame_hook(void *frame, uint32_t frame_size, struct mac80211_rdkfma
 	return 0;
 }
 
-extern int send_data_frame(void *buff, uint32_t frame_size, struct ieee80211_hw *hw);
-
 static void mac80211_hwsim_tx(struct ieee80211_hw *hw,
 				struct ieee80211_tx_control *control,
 				struct sk_buff *skb)
@@ -1769,21 +1727,6 @@ static void mac80211_hwsim_tx(struct ieee80211_hw *hw,
 	data->tx_pkts++;
 	data->tx_bytes += skb->len;
 	ack = mac80211_hwsim_tx_frame_no_nl(hw, skb, channel);
-
-	/* forward EAPOL cross-box only; skip if Path A already delivered (ack=true) */
-	if (!ack &&
-	    ieee80211_is_data(hdr->frame_control) &&
-	    !is_multicast_ether_addr(hdr->addr1) &&
-	    !txi->control.hw_key) {
-		int _hlen = ieee80211_hdrlen(hdr->frame_control);
-		u8 *_p = (u8 *)hdr;
-		if (skb->len >= _hlen + 8 &&
-		    _p[_hlen + 6] == 0x88 && _p[_hlen + 7] == 0x8e)
-			send_data_frame(skb->data, skb->len, hw);
-	}
-
-	if (!is_multicast_ether_addr(hdr->addr1))
-		ack = true;
 
 	if (ack && skb->len >= 16)
 		mac80211_hwsim_monitor_ack(channel, hdr->addr2);
@@ -3284,7 +3227,6 @@ static int mac80211_hwsim_new_radio(struct genl_info *info,
 	hw->offchannel_tx_hw_queue = 4;
 
 	ieee80211_hw_set(hw, SUPPORT_FAST_XMIT);
-	ieee80211_hw_set(hw, SUPPORTS_MULTI_BSSID);
 	ieee80211_hw_set(hw, CHANCTX_STA_CSA);
 	ieee80211_hw_set(hw, SUPPORTS_HT_CCK_RATES);
 	ieee80211_hw_set(hw, QUEUE_CONTROL);
@@ -4213,13 +4155,6 @@ static void parse_start_ap(struct genl_info *info)
 	start_ap_msg->u.cfg80211.ops = wlan_emu_cfg80211_ops_type_start_ap;
 	start_ap_msg->u.cfg80211.u.start_ap.ifindex = idx;
 	start_ap_msg->u.cfg80211.u.start_ap.phy_index = wiphy_idx;
-
-	if (info->attrs[NL80211_ATTR_SSID]) {
-		start_ap_msg->u.cfg80211.u.start_ap.ssid_len = nla_len(info->attrs[NL80211_ATTR_SSID]);
-		if (start_ap_msg->u.cfg80211.u.start_ap.ssid_len == 0)
-			return;
-		memcpy(start_ap_msg->u.cfg80211.u.start_ap.ssid, nla_data(info->attrs[NL80211_ATTR_SSID]), start_ap_msg->u.cfg80211.u.start_ap.ssid_len);
-	}
 
 	if (info->attrs[NL80211_ATTR_BEACON_HEAD])
 	{
@@ -5236,9 +5171,7 @@ static void hwsim_exit_netlink(void)
 static int __init rdkfmac_init_module(void)
 {
 	int err;
-	unsigned int itr = 0;
 	struct hwsim_new_radio_params param = { 0 };
-	printk("%s:%d init with %d simulated clients\n", __func__, __LINE__, max_sim_clients);
 
 	err = rhashtable_init(&hwsim_radios_rht, &hwsim_rht_params);
 	if (err)
@@ -5262,13 +5195,19 @@ static int __init rdkfmac_init_module(void)
 		goto out_exit_netlink;
 	}
 
-    for (itr = 0; itr < max_sim_clients; itr++) {
-        err = mac80211_hwsim_new_radio(NULL, &param);
-        if (err < 0)
-            goto out_free_radios;
-    }
-
-        hwsim_mon = alloc_netdev(0, "hwsim%d", NET_NAME_UNKNOWN,
+	err = mac80211_hwsim_new_radio(NULL, &param);
+	if (err < 0)
+		goto out_free_radios;
+printk("Radio 1 create\n");
+	err = mac80211_hwsim_new_radio(NULL, &param);
+	if (err < 0)
+		goto out_free_radios;
+printk("Radio 2 create\n");
+	err = mac80211_hwsim_new_radio(NULL, &param);
+	if (err < 0)
+		goto out_free_radios;
+	printk("Radio 3 create\n");
+	hwsim_mon = alloc_netdev(0, "hwsim%d", NET_NAME_UNKNOWN,
 				 hwsim_mon_setup);
 	if (hwsim_mon == NULL) {
 		err = -ENOMEM;
