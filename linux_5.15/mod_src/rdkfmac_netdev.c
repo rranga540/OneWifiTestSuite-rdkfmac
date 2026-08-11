@@ -1456,7 +1456,9 @@ static bool mac80211_hwsim_tx_frame_no_nl(struct ieee80211_hw *hw,
 			.channel = chan,
 		};
 
-		if (data == data2)
+		/* unicast: only deliver to the hardware whose VIF owns addr1 */
+		if (!is_multicast_ether_addr(hdr->addr1) &&
+		    !mac80211_hwsim_addr_match(data2, hdr->addr1))
 			continue;
 
 		if (!data2->started || (data2->idle && !data2->tmp_chan) ||
@@ -1482,8 +1484,9 @@ static bool mac80211_hwsim_tx_frame_no_nl(struct ieee80211_hw *hw,
 		if (!nskb)
 			continue;
 
-		if (mac80211_hwsim_addr_match(data2, hdr->addr1))
+		if (mac80211_hwsim_addr_match(data2, hdr->addr1)) {
 			ack = true;
+		}
 
 		rx_status.mactime = now + data2->tsf_offset;
 
@@ -1729,6 +1732,8 @@ int send_eth_frame_hook(void *frame, uint32_t frame_size, struct mac80211_rdkfma
 	return 0;
 }
 
+extern int send_data_frame(void *buff, uint32_t frame_size, struct ieee80211_hw *hw);
+
 static void mac80211_hwsim_tx(struct ieee80211_hw *hw,
 				struct ieee80211_tx_control *control,
 				struct sk_buff *skb)
@@ -1854,6 +1859,21 @@ static void mac80211_hwsim_tx(struct ieee80211_hw *hw,
 	data->tx_pkts++;
 	data->tx_bytes += skb->len;
 	ack = mac80211_hwsim_tx_frame_no_nl(hw, skb, channel);
+
+	/* forward EAPOL cross-box only; skip if Path A already delivered (ack=true) */
+	if (!ack &&
+	    ieee80211_is_data(hdr->frame_control) &&
+	    !is_multicast_ether_addr(hdr->addr1) &&
+	    !txi->control.hw_key) {
+		int _hlen = ieee80211_hdrlen(hdr->frame_control);
+		u8 *_p = (u8 *)hdr;
+		if (skb->len >= _hlen + 8 &&
+		    _p[_hlen + 6] == 0x88 && _p[_hlen + 7] == 0x8e)
+			send_data_frame(skb->data, skb->len, hw);
+	}
+
+	if (!is_multicast_ether_addr(hdr->addr1))
+		ack = true;
 
 	if (ack && skb->len >= 16)
 		mac80211_hwsim_monitor_ack(channel, hdr->addr2);
