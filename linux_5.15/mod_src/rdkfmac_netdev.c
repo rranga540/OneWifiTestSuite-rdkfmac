@@ -1014,6 +1014,59 @@ static void push_frame_to_char_dev(void *data, unsigned int len)
 	return;
 }
 
+static const char *sta_conn_state_name(sta_conn_state_t s)
+{
+	switch (s) {
+	case STA_STATE_IDLE:			return "IDLE";
+	case STA_STATE_MAC_UPDATED:		return "MAC_UPDATED";
+	case STA_STATE_AUTH_REQ_SENT:		return "AUTH_REQ_SENT";
+	case STA_STATE_AUTH_RESP_RECEIVED:	return "AUTH_RESP_RECEIVED";
+	case STA_STATE_ASSOC_REQ_SENT:		return "ASSOC_REQ_SENT";
+	case STA_STATE_ASSOC_RESP_RECEIVED:	return "ASSOC_RESP_RECEIVED";
+	case STA_STATE_EAPOL:			return "EAPOL";
+	case STA_STATE_CONNECTED:		return "CONNECTED";
+	case STA_STATE_FAILED:			return "FAILED";
+	default:				return "UNKNOWN";
+	}
+}
+
+/* Observability only: records per-STA progress in its own ctx; alters no frames. */
+static void sta_conn_state_transition(struct mac80211_rdkfmac_data *ctx,
+				      sta_conn_state_t new_state,
+				      const char *reason)
+{
+	sta_conn_state_t old_state;
+
+	if (!ctx)
+		return;
+
+	old_state = ctx->sta_conn_state;
+
+	/* Suppress duplicate/no-op transitions (repeated EAPOL, reflected copies). */
+	if (old_state == new_state)
+		return;
+
+	/* Backward moves are unexpected except an explicit reset/failure; keep
+	 * the last good state visible instead of overwriting it.
+	 */
+	if (new_state < old_state &&
+	    new_state != STA_STATE_IDLE &&
+	    new_state != STA_STATE_FAILED) {
+		printk(KERN_INFO
+		       "STA-STATE sta=%pM ctx=%p %s -> %s reason=%s UNEXPECTED-BACKWARD\n",
+		       ctx->addresses[1].addr, ctx,
+		       sta_conn_state_name(old_state),
+		       sta_conn_state_name(new_state), reason);
+		return;
+	}
+
+	ctx->sta_conn_state = new_state;
+	printk(KERN_INFO "STA-STATE sta=%pM ctx=%p %s -> %s reason=%s\n",
+	       ctx->addresses[1].addr, ctx,
+	       sta_conn_state_name(old_state),
+	       sta_conn_state_name(new_state), reason);
+}
+
 static netdev_tx_t hwsim_mon_xmit(struct sk_buff *skb,
 					struct net_device *dev)
 {
@@ -1076,8 +1129,15 @@ static netdev_tx_t hwsim_mon_xmit(struct sk_buff *skb,
 	list_for_each_entry(nic, &hwsim_radios, list) {
 		struct sk_buff *nskb;
 		struct ieee80211_rx_status rx_status = {0};
-		if(nic->idle || !nic->started || !nic->channel)
+		if(nic->idle || !nic->started || !nic->channel) {
+			if (hdr80211 && !is_multicast_ether_addr(hdr80211->addr1) &&
+			    mac80211_hwsim_addr_match(nic, hdr80211->addr1))
+				printk("STA-RX: DROP dst=%pM radio=%pM reason=%s stype=%u — mgmt lost pre-assoc\n",
+				       hdr80211->addr1, nic->addresses[1].addr,
+				       nic->idle ? "idle" : (!nic->started ? "not-started" : "no-channel"),
+				       WLAN_FC_GET_STYPE(le16_to_cpu(hdr80211->frame_control)));
 			continue;
+		}
 		if (hdr80211 && !is_multicast_ether_addr(hdr80211->addr1) &&
 		    !mac80211_hwsim_addr_match(nic, hdr80211->addr1)) {
 			printk("hwsim_mon_xmit: skip radio %pM (addr1=%pM no match)\n",
@@ -1090,6 +1150,23 @@ static netdev_tx_t hwsim_mon_xmit(struct sk_buff *skb,
 
 		printk("hwsim_mon_xmit: inject to radio %pM\n",
 			 nic->addresses[1].addr);
+
+		if (hdr80211) {
+			if (ieee80211_is_auth(hdr80211->frame_control))
+				sta_conn_state_transition(nic, STA_STATE_AUTH_RESP_RECEIVED,
+							  "auth-response-rx");
+			else if (ieee80211_is_assoc_resp(hdr80211->frame_control))
+				sta_conn_state_transition(nic, STA_STATE_ASSOC_RESP_RECEIVED,
+							  "assoc-response-rx");
+			else if (ieee80211_is_data(hdr80211->frame_control)) {
+				int _hl = ieee80211_hdrlen(hdr80211->frame_control);
+				u8 *_p = (u8 *)hdr80211;
+				if (nskb->len >= _hl + 8 &&
+				    _p[_hl + 6] == 0x88 && _p[_hl + 7] == 0x8e)
+					sta_conn_state_transition(nic, STA_STATE_EAPOL,
+								  "eapol-rx");
+			}
+		}
 
 		rx_status.freq = freq;
 		memcpy(IEEE80211_SKB_RXCB(nskb), &rx_status, sizeof(rx_status));
@@ -1944,6 +2021,22 @@ static void mac80211_hwsim_tx(struct ieee80211_hw *hw,
 			ieee80211_is_assoc_req(hdr->frame_control) || ieee80211_is_deauth(hdr->frame_control)
 			|| ieee80211_is_disassoc(hdr->frame_control))
 	{
+		if (ieee80211_is_auth(hdr->frame_control))
+			printk("STA-TX: AUTH-REQ sta=%pM dst=%pM ctx=%p template=%s\n",
+			       hdr->addr2, hdr->addr1, data,
+			       data->auth_req ? "present" : "MISSING");
+		else if (ieee80211_is_assoc_req(hdr->frame_control))
+			printk("STA-TX: ASSOC-REQ sta=%pM dst=%pM ctx=%p template=%s\n",
+			       hdr->addr2, hdr->addr1, data,
+			       data->assoc_req ? "present" : "MISSING");
+
+		if (ieee80211_is_auth(hdr->frame_control))
+			sta_conn_state_transition(data, STA_STATE_AUTH_REQ_SENT,
+						  "auth-request-tx");
+		else if (ieee80211_is_assoc_req(hdr->frame_control))
+			sta_conn_state_transition(data, STA_STATE_ASSOC_REQ_SENT,
+						  "assoc-request-tx");
+
 		send_eth_frame(skb->data, skb->len, data);
 		send_eth_frame_hook(skb->data, skb->len, data);
 
@@ -2064,8 +2157,10 @@ static void mac80211_hwsim_tx(struct ieee80211_hw *hw,
 		int _hlen = ieee80211_hdrlen(hdr->frame_control);
 		u8 *_p = (u8 *)hdr;
 		if (skb->len >= _hlen + 8 &&
-		    _p[_hlen + 6] == 0x88 && _p[_hlen + 7] == 0x8e)
+		    _p[_hlen + 6] == 0x88 && _p[_hlen + 7] == 0x8e) {
+			sta_conn_state_transition(data, STA_STATE_EAPOL, "eapol-tx");
 			send_data_frame(skb->data, skb->len, hw);
+		}
 	}
 
 	if (!is_multicast_ether_addr(hdr->addr1))
@@ -4133,6 +4228,10 @@ int update_auth_req(char *frame, size_t frame_len)
 			return -ENOMEM;
 		}
 		memcpy(data2->auth_req, frame + ETH_ALEN, data2->auth_req_len);
+		printk("STA-CTX: auth_req stored sta=%pM ctx=%p len=%d\n",
+		       addr, data2, data2->auth_req_len);
+	} else {
+		printk("STA-CTX: auth_req LOOKUP-FAIL sta=%pM — no radio/context for this MAC\n", addr);
 	}
 	return 0;
 }
@@ -4158,6 +4257,10 @@ int update_assoc_req(char *frame, size_t frame_len)
 			return -ENOMEM;
 		}
 		memcpy(data2->assoc_req, frame + ETH_ALEN, data2->assoc_req_len);
+		printk("STA-CTX: assoc_req stored sta=%pM ctx=%p len=%d\n",
+		       addr, data2, data2->assoc_req_len);
+	} else {
+		printk("STA-CTX: assoc_req LOOKUP-FAIL sta=%pM — no radio/context for this MAC\n", addr);
 	}
 	return 0;
 }
@@ -4206,6 +4309,8 @@ int update_sta_new_mac(mac_update_t *mac_update)
 		}
 		printk("%s:%d new mac update : %pM with bridge:%s\n", __func__, __LINE__, mac_update->new_mac, data2->bridge_name);
 		spin_unlock_bh(&hwsim_radio_lock);
+
+		sta_conn_state_transition(data2, STA_STATE_MAC_UPDATED, "mac-update");
 
 		return 0;
 	}

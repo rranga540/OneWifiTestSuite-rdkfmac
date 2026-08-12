@@ -88,6 +88,7 @@ void push_to_char_device(wlan_emu_msg_data_t *data)
 	wlan_emu_msg_data_t	*spec;
 	char	str_spec_type[32];
 	char	str_ops[128];
+	struct ieee80211_hdr *dbg_hdr;
 
 	// do not push to list if nobody is listening
 	if (g_char_device.num_inst == 0) {
@@ -137,6 +138,19 @@ void push_to_char_device(wlan_emu_msg_data_t *data)
 		printk("%s:%d: pushing data to queue, type: %s ops: %s current size: %d\n", __func__, __LINE__,
 			str_spec_type, str_ops, get_list_entries_count_in_char_device());
 	}
+
+	/* Debug: log EAPOL frames entering shared queue with dest MAC for multi-client tracing */
+	if (spec->type == wlan_emu_msg_type_frm80211 &&
+	    spec->u.frm80211.ops == wlan_emu_frm80211_ops_type_eapol &&
+	    spec->u.frm80211.u.frame.frame_len >= 24) {
+		dbg_hdr = (struct ieee80211_hdr *)spec->u.frm80211.u.frame.frame;
+		printk("EAPOL-QUEUE: PUSH dst=%pM src=%pM len=%u instances=%d qsize=%d\n",
+		       dbg_hdr->addr1, dbg_hdr->addr2,
+		       spec->u.frm80211.u.frame.frame_len,
+		       g_char_device.num_inst,
+		       get_list_entries_count_in_char_device());
+	}
+
 	list_add(&entry->list_entry, g_char_device.list_tail);
 	g_char_device.list_tail = &entry->list_entry;
 
@@ -406,33 +420,6 @@ static void handle_frm80211_msg_w(char *read_buff, size_t size) {
 			kfree(frm80211_msg);
 			return;
 		} else {
-			/*
-			 * Drop reflected STA→AP EAPOL frames (M2/M4).
-			 * Frames written here represent frames from the network arriving at our STA.
-			 * M2 and M4 are always STA→AP; if they appear here they were reflected by
-			 * the cross-box bridge (send_data_frame → brlan0 → HAL → write back).
-			 * key_info: MIC(bit8)=1 and ACK(bit7)=0 identifies both M2 and M4.
-			 * M1 (ACK=1,MIC=0) and M3 (ACK=1,MIC=1) are never dropped.
-			 */
-			unsigned int avail = frm80211_msg->u.frm80211.u.frame.frame_len
-					     - data_header_len - sizeof(rfc1042_hdr) - 2;
-			if (avail >= 7) {
-				const u8 *eapol = tmp_frame_buf + 2;
-				u16 key_info;
-
-				if (eapol[1] == 3 /* EAPOL-Key */) {
-					key_info = ((u16)eapol[5] << 8) | eapol[6];
-					/* MIC set (BIT8), ACK not set (BIT7) → M2 or M4 */
-					if ((key_info & BIT(8)) && !(key_info & BIT(7))) {
-						printk("EAPOL-TRACE: drop reflected M%d key_info=0x%04x src=%pM — loop via brlan0 prevented\n",
-						       (key_info & BIT(9)) ? 4 : 2, key_info,
-						       hdr->addr2);
-						kfree(frm80211_msg->u.frm80211.u.frame.frame);
-						kfree(frm80211_msg);
-						return;
-					}
-				}
-			}
 			msg_ops_type = wlan_emu_frm80211_ops_type_eapol;
 		}
 	}
@@ -724,11 +711,17 @@ static void handle_frame(wlan_emu_msg_data_t *spec, ssize_t *len, u8 *s_tmp)
 	*len += sizeof(wlan_emu_frm80211_ops_type_t);
 
 	printk("%s:%d Frame len is %d ops is %d\n", __func__, __LINE__, spec->u.frm80211.u.frame.frame_len, spec->u.frm80211.ops);
-	if (spec->u.frm80211.ops == wlan_emu_frm80211_ops_type_eapol)
+	if (spec->u.frm80211.ops == wlan_emu_frm80211_ops_type_eapol) {
+		struct ieee80211_hdr *rd_hdr = (struct ieee80211_hdr *)spec->u.frm80211.u.frame.frame;
+		printk("EAPOL-QUEUE: POP dst=%pM src=%pM len=%u reader_pid=%d instances=%d\n",
+		       rd_hdr->addr1, rd_hdr->addr2,
+		       spec->u.frm80211.u.frame.frame_len,
+		       current->pid, g_char_device.num_inst);
 		rdkfmac_eapol_trace_80211("RX processing", "char-device/dequeue",
 					   spec->u.frm80211.u.frame.frame,
 					   spec->u.frm80211.u.frame.frame_len,
 					   "rdkfmac", false);
+	}
 	memcpy(s_tmp, &spec->u.frm80211.u.frame.frame_len, sizeof(unsigned int));
 	s_tmp += sizeof(unsigned int);
 	*len += sizeof(unsigned int);
@@ -844,7 +837,9 @@ static int rdkfmac_open(struct inode *inode, struct file *file)
 {
 
 	g_char_device.num_inst++;
-	printk(KERN_INFO "%s:%d Opened Instances: %d\n", __func__, __LINE__, g_char_device.num_inst);
+	printk(KERN_INFO "EAPOL-QUEUE: OPEN instances=%d pid=%d qsize=%d\n",
+	       g_char_device.num_inst, current->pid,
+	       get_list_entries_count_in_char_device());
 
 	return 0;
 }
@@ -855,8 +850,10 @@ static int rdkfmac_release(struct inode *inode, struct file *file)
 		g_char_device.num_inst--;
 	}
 
-		printk(KERN_INFO "%s:%d Opened Instances: %d\n", __func__, __LINE__, g_char_device.num_inst);
-		return 0;
+	printk(KERN_INFO "EAPOL-QUEUE: CLOSE instances=%d pid=%d qsize=%d\n",
+	       g_char_device.num_inst, current->pid,
+	       get_list_entries_count_in_char_device());
+	return 0;
 }
 
 const struct file_operations rdkfmac_fops = {

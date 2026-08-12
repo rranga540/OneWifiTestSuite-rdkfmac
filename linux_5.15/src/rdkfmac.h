@@ -458,6 +458,19 @@ static const u32 rdkfmac_ciphers[] = {
 	WLAN_CIPHER_SUITE_AES_CMAC,
 };
 
+/* Per-STA connection progress; observability only, never drives packet TX/RX. */
+typedef enum {
+	STA_STATE_IDLE = 0,
+	STA_STATE_MAC_UPDATED,
+	STA_STATE_AUTH_REQ_SENT,
+	STA_STATE_AUTH_RESP_RECEIVED,
+	STA_STATE_ASSOC_REQ_SENT,
+	STA_STATE_ASSOC_RESP_RECEIVED,
+	STA_STATE_EAPOL,
+	STA_STATE_CONNECTED,
+	STA_STATE_FAILED,
+} sta_conn_state_t;
+
 struct mac80211_rdkfmac_data {
 	struct list_head list;
 	struct rhash_head rht;
@@ -547,6 +560,7 @@ struct mac80211_rdkfmac_data {
 	char *auth_req;
 	int auth_req_len;
 	int op_modes;
+	sta_conn_state_t sta_conn_state;
 };
 
 int update_auth_req(char *frame, size_t frame_len);
