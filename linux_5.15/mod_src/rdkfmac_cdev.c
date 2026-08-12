@@ -10,6 +10,10 @@ static wlan_emu_msg_data_t *pop_from_char_device(void);
 static unsigned int get_list_entries_count_in_char_device(void);
 static bool  rdkfmac_emu80211_close = true;
 
+extern void rdkfmac_eapol_trace_80211(const char *stage, const char *path,
+					      const u8 *frame, unsigned int frame_len,
+					      const char *ifname, bool count_event);
+
 const char *rdkfmac_cfg80211_ops_type_to_string(wlan_emu_cfg80211_ops_type_t type)
 {
 #define CFG80211_TO_S(x) case x: return #x;
@@ -408,6 +412,11 @@ static void handle_frm80211_msg_w(char *read_buff, size_t size) {
 
 	//updating the final correct value
 	memcpy(&frm80211_msg->u.frm80211.ops, &msg_ops_type, sizeof(wlan_emu_cfg80211_ops_type_t));
+	if (msg_ops_type == wlan_emu_frm80211_ops_type_eapol)
+		rdkfmac_eapol_trace_80211("RX M2 userspace write", "char-device/userspace",
+					   frm80211_msg->u.frm80211.u.frame.frame,
+					   frm80211_msg->u.frm80211.u.frame.frame_len,
+					   "rdkfmac", false);
 
 	push_to_char_device(frm80211_msg);
 	kfree(frm80211_msg);
@@ -688,6 +697,11 @@ static void handle_frame(wlan_emu_msg_data_t *spec, ssize_t *len, u8 *s_tmp)
 	*len += sizeof(wlan_emu_frm80211_ops_type_t);
 
 	printk("%s:%d Frame len is %d ops is %d\n", __func__, __LINE__, spec->u.frm80211.u.frame.frame_len, spec->u.frm80211.ops);
+	if (spec->u.frm80211.ops == wlan_emu_frm80211_ops_type_eapol)
+		rdkfmac_eapol_trace_80211("RX processing", "char-device/dequeue",
+					   spec->u.frm80211.u.frame.frame,
+					   spec->u.frm80211.u.frame.frame_len,
+					   "rdkfmac", false);
 	memcpy(s_tmp, &spec->u.frm80211.u.frame.frame_len, sizeof(unsigned int));
 	s_tmp += sizeof(unsigned int);
 	*len += sizeof(unsigned int);

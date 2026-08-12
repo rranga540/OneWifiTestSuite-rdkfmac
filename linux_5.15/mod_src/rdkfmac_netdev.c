@@ -48,6 +48,125 @@
 #include <linux/leds.h>
 #include <linux/average.h>
 #include "rdkfmac.h"
+
+static atomic_t eapol_trace_counts[5][256];
+
+static u32 rdkfmac_eapol_trace_hash(const u8 *sta, u64 replay)
+{
+	u32 hash = (u32)replay ^ (u32)(replay >> 32);
+	int index;
+
+	for (index = 0; index < ETH_ALEN; index++)
+		hash = (hash * 33) ^ sta[index];
+
+	return hash;
+}
+
+static void rdkfmac_eapol_trace_fields(const char *stage, const char *path,
+					       const u8 *src, const u8 *dst,
+					       const u8 *eapol, unsigned int eapol_avail,
+					       unsigned int frame_len, const char *ifname,
+					       bool count_event)
+{
+	u16 eapol_len;
+	u16 key_info;
+	u64 replay;
+	u64 trace_id;
+	u8 descriptor_version;
+	u8 message = 0;
+	const u8 *sta;
+	u32 hash;
+	int count = 0;
+	struct timespec64 timestamp;
+
+	if (eapol_avail < 4)
+		return;
+
+	eapol_len = ((u16)eapol[2] << 8) | eapol[3];
+	if (eapol[1] != 3 || eapol_avail < 25)
+		return;
+
+	key_info = ((u16)eapol[5] << 8) | eapol[6];
+	replay = ((u64)eapol[9] << 56) | ((u64)eapol[10] << 48) |
+		 ((u64)eapol[11] << 40) | ((u64)eapol[12] << 32) |
+		 ((u64)eapol[13] << 24) | ((u64)eapol[14] << 16) |
+		 ((u64)eapol[15] << 8) | eapol[16];
+	descriptor_version = key_info & 0x7;
+
+	if ((key_info & BIT(7)) && !(key_info & BIT(8)))
+		message = 1;
+	else if (!(key_info & BIT(7)) && (key_info & BIT(8)) &&
+		 !(key_info & BIT(6)) && !(key_info & BIT(9)))
+		message = 2;
+	else if ((key_info & BIT(6)) && (key_info & BIT(7)) &&
+		 (key_info & BIT(8)))
+		message = 3;
+	else if (!(key_info & BIT(7)) && (key_info & BIT(8)) &&
+		 (key_info & BIT(9)))
+		message = 4;
+
+	sta = message == 1 ? dst : src;
+	hash = rdkfmac_eapol_trace_hash(sta, replay);
+	trace_id = ((u64)hash << 32) | (u32)replay;
+	if (count_event && message <= 4)
+		count = atomic_inc_return(&eapol_trace_counts[message][hash & 0xff]);
+
+	ktime_get_real_ts64(&timestamp);
+	printk("EAPOL-TRACE: %s path=%s trace=%08x%08x sta=%pM src=%pM dst=%pM "
+		"if=%s ethertype=0x888e frame_len=%u eapol_len=%u msg=M%u "
+		"key_info=0x%04x desc_ver=%u replay=%016llx count=%d duplicate=%s "
+		"time=%lld.%09ld nonce=%02x%02x%02x%02x%02x%02x%02x%02x\n",
+		stage, path, (u32)(trace_id >> 32), (u32)trace_id, sta, src, dst,
+		ifname ? ifname : "unknown", frame_len, eapol_len, message, key_info,
+		descriptor_version, replay, count, count > 1 ? "yes" : "no",
+		timestamp.tv_sec, timestamp.tv_nsec, eapol[17], eapol[18], eapol[19],
+		eapol[20], eapol[21], eapol[22], eapol[23], eapol[24]);
+}
+
+void rdkfmac_eapol_trace_80211(const char *stage, const char *path,
+					const u8 *frame, unsigned int frame_len,
+					const char *ifname, bool count_event)
+{
+	const struct ieee80211_hdr *hdr;
+	const u8 *llc;
+	unsigned int hdr_len;
+
+	if (!frame || frame_len < sizeof(*hdr))
+		return;
+
+	hdr = (const struct ieee80211_hdr *)frame;
+	hdr_len = ieee80211_hdrlen(hdr->frame_control);
+	if (hdr_len > frame_len || frame_len - hdr_len < 8)
+		return;
+
+	llc = frame + hdr_len;
+	if (llc[0] != 0xaa || llc[1] != 0xaa || llc[2] != 0x03 ||
+		llc[3] != 0x00 || llc[4] != 0x00 || llc[5] != 0x00 ||
+		llc[6] != 0x88 || llc[7] != 0x8e)
+		return;
+
+	rdkfmac_eapol_trace_fields(stage, path, hdr->addr2, hdr->addr1,
+					   llc + 8, frame_len - hdr_len - 8,
+					   frame_len, ifname, count_event);
+}
+
+void rdkfmac_eapol_trace_ethernet(const char *stage, const char *path,
+					  const u8 *frame, unsigned int frame_len,
+					  const char *ifname, bool count_event)
+{
+	const struct ethhdr *eth;
+
+	if (!frame || frame_len < ETH_HLEN + 4)
+		return;
+
+	eth = (const struct ethhdr *)frame;
+	if (eth->h_proto != htons(ETH_P_PAE))
+		return;
+
+	rdkfmac_eapol_trace_fields(stage, path, eth->h_source, eth->h_dest,
+					   frame + ETH_HLEN, frame_len - ETH_HLEN,
+					   frame_len, ifname, count_event);
+}
 #include "rdkfmac_cmd.h"
 #include "rdkfmac_cfg80211.h"
 #include "wlan_emu_msg_data.h"
@@ -859,6 +978,8 @@ static void push_frame_to_char_dev(void *data, unsigned int len)
 
 	if (mgmt) {
 		fc = mgmt->frame_control;
+		rdkfmac_eapol_trace_80211("RX processing", "monitor/bridge",
+					   data, frame_len, "hwsim_mon", false);
 
 		printk("%s:%d FC: %d Frame type %d Subtype %d frame_len %d\n", __func__, __LINE__, fc, WLAN_FC_GET_TYPE(fc), WLAN_FC_GET_STYPE(fc), frame_len);
 
@@ -904,6 +1025,8 @@ static netdev_tx_t hwsim_mon_xmit(struct sk_buff *skb,
 	struct ieee80211_mgmt *mgmt;
 
 		eth_hdr = (struct ethhdr *)skb_mac_header(skb);
+	rdkfmac_eapol_trace_ethernet("RX EAPOL", "monitor/bridge",
+					  (u8 *)eth_hdr, skb->len, dev->name, false);
 
 	if (ntohs(eth_hdr->h_proto) == 9001)
 		push_frame_to_char_dev((skb->data + ETH_HLEN + sizeof(u8aRadiotapHeader)), (skb->len - (ETH_HLEN + sizeof(u8aRadiotapHeader))));
@@ -915,6 +1038,8 @@ static netdev_tx_t hwsim_mon_xmit(struct sk_buff *skb,
 		memcpy(&freq, skb->data + 10, sizeof(freq));
 		skb_pull(skb, ieee80211_get_radiotap_len(skb->data));
 		hdr80211 = (struct ieee80211_hdr *)skb->data;
+		rdkfmac_eapol_trace_80211("RX M1", "monitor/bridge", skb->data,
+					   skb->len, dev->name, true);
 		printk("hwsim_mon_xmit: proto=0x%04x freq=%u fc=0x%04x type=%u stype=%u addr1=%pM addr2=%pM multicast=%d\n",
 			 ntohs(eth_hdr->h_proto), freq,
 			 le16_to_cpu(hdr80211->frame_control),
@@ -969,6 +1094,8 @@ static netdev_tx_t hwsim_mon_xmit(struct sk_buff *skb,
 		rx_status.freq = freq;
 		memcpy(IEEE80211_SKB_RXCB(nskb), &rx_status, sizeof(rx_status));
 
+		rdkfmac_eapol_trace_80211("RX delivered", "simulated-radio",
+					   nskb->data, nskb->len, "sim-radio", false);
 		ieee80211_rx_irqsafe(nic->hw, nskb);
 	}
 	spin_unlock(&hwsim_radio_lock);
@@ -1807,6 +1934,8 @@ static void mac80211_hwsim_tx(struct ieee80211_hw *hw,
 	enum nl80211_chan_width confbw = NL80211_CHAN_WIDTH_20_NOHT;
 	u32 _portid, i;
 
+	rdkfmac_eapol_trace_80211("TX M2", "mac80211-driver", skb->data,
+					   skb->len, data->hw->wiphy->dev.name, false);
 
 	struct ethhdr *eth_hdr;
 	eth_hdr = (void *)skb->data;
@@ -1912,13 +2041,20 @@ static void mac80211_hwsim_tx(struct ieee80211_hw *hw,
 	/* wmediumd mode check */
 	_portid = READ_ONCE(data->wmediumd);
 
-	if (_portid)
+	if (_portid) {
+		rdkfmac_eapol_trace_80211("TX M2 forwarded", "wmediumd",
+					   skb->data, skb->len,
+					   data->hw->wiphy->dev.name, false);
 		return mac80211_hwsim_tx_frame_nl(hw, skb, _portid, channel);
+	}
 
 	/* NO wmediumd detected, perfect medium simulation */
 	data->tx_pkts++;
 	data->tx_bytes += skb->len;
 	ack = mac80211_hwsim_tx_frame_no_nl(hw, skb, channel);
+	rdkfmac_eapol_trace_80211("TX M2 fanout", "simulated-medium",
+					   skb->data, skb->len,
+					   data->hw->wiphy->dev.name, false);
 
 	/* forward EAPOL cross-box only; skip if Path A already delivered (ack=true) */
 	if (!ack &&
@@ -1946,6 +2082,9 @@ static void mac80211_hwsim_tx(struct ieee80211_hw *hw,
 
 	if (!(txi->flags & IEEE80211_TX_CTL_NO_ACK) && ack)
 		txi->flags |= IEEE80211_TX_STAT_ACK;
+	rdkfmac_eapol_trace_80211(ack ? "TX M2 complete" : "TX M2 dropped",
+					   "mac80211-driver", skb->data, skb->len,
+					   data->hw->wiphy->dev.name, false);
 	ieee80211_tx_status_irqsafe(hw, skb);
 }
 
