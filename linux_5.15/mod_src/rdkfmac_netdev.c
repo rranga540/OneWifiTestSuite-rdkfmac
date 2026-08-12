@@ -171,6 +171,8 @@ struct hwsim_vif_priv {
 };
 
 static struct mac80211_rdkfmac_data *get_hwsim_data_ref_from_addr(const u8 *addr);
+static bool mac80211_hwsim_addr_match(struct mac80211_rdkfmac_data *data,
+				      const u8 *addr);
 
 #define HWSIM_VIF_MAGIC	0x69537748
 
@@ -897,6 +899,7 @@ static netdev_tx_t hwsim_mon_xmit(struct sk_buff *skb,
 		struct ethhdr *eth_hdr;
 	struct mac80211_rdkfmac_data *nic;
 	u32 freq = 2462;
+	struct ieee80211_hdr *hdr80211 = NULL;
 	struct ieee80211_hdr *hdr;
 	struct ieee80211_mgmt *mgmt;
 
@@ -911,6 +914,16 @@ static netdev_tx_t hwsim_mon_xmit(struct sk_buff *skb,
 	if (ntohs(eth_hdr->h_proto) != 34958) {
 		memcpy(&freq, skb->data + 10, sizeof(freq));
 		skb_pull(skb, ieee80211_get_radiotap_len(skb->data));
+		hdr80211 = (struct ieee80211_hdr *)skb->data;
+		printk("hwsim_mon_xmit: proto=0x%04x freq=%u fc=0x%04x type=%u stype=%u addr1=%pM addr2=%pM multicast=%d\n",
+			 ntohs(eth_hdr->h_proto), freq,
+			 le16_to_cpu(hdr80211->frame_control),
+			 WLAN_FC_GET_TYPE(le16_to_cpu(hdr80211->frame_control)),
+			 WLAN_FC_GET_STYPE(le16_to_cpu(hdr80211->frame_control)),
+			 hdr80211->addr1, hdr80211->addr2,
+			 is_multicast_ether_addr(hdr80211->addr1));
+	} else {
+		printk("hwsim_mon_xmit: raw EAPOL (0x888e), skipping addr filter\n");
 	}
 
 	
@@ -939,10 +952,19 @@ static netdev_tx_t hwsim_mon_xmit(struct sk_buff *skb,
 		struct sk_buff *nskb;
 		struct ieee80211_rx_status rx_status = {0};
 		if(nic->idle || !nic->started || !nic->channel)
-		continue;
+			continue;
+		if (hdr80211 && !is_multicast_ether_addr(hdr80211->addr1) &&
+		    !mac80211_hwsim_addr_match(nic, hdr80211->addr1)) {
+			printk("hwsim_mon_xmit: skip radio %pM (addr1=%pM no match)\n",
+				 nic->addresses[1].addr, hdr80211->addr1);
+			continue;
+		}
 		nskb = skb_copy(skb, GFP_ATOMIC);
 		if(nskb == NULL)
-		continue;
+			continue;
+
+		printk("hwsim_mon_xmit: inject to radio %pM\n",
+			 nic->addresses[1].addr);
 
 		rx_status.freq = freq;
 		memcpy(IEEE80211_SKB_RXCB(nskb), &rx_status, sizeof(rx_status));
