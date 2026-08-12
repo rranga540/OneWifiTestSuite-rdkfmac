@@ -406,6 +406,33 @@ static void handle_frm80211_msg_w(char *read_buff, size_t size) {
 			kfree(frm80211_msg);
 			return;
 		} else {
+			/*
+			 * Drop reflected STA→AP EAPOL frames (M2/M4).
+			 * Frames written here represent frames from the network arriving at our STA.
+			 * M2 and M4 are always STA→AP; if they appear here they were reflected by
+			 * the cross-box bridge (send_data_frame → brlan0 → HAL → write back).
+			 * key_info: MIC(bit8)=1 and ACK(bit7)=0 identifies both M2 and M4.
+			 * M1 (ACK=1,MIC=0) and M3 (ACK=1,MIC=1) are never dropped.
+			 */
+			unsigned int avail = frm80211_msg->u.frm80211.u.frame.frame_len
+					     - data_header_len - sizeof(rfc1042_hdr) - 2;
+			if (avail >= 7) {
+				const u8 *eapol = tmp_frame_buf + 2;
+				u16 key_info;
+
+				if (eapol[1] == 3 /* EAPOL-Key */) {
+					key_info = ((u16)eapol[5] << 8) | eapol[6];
+					/* MIC set (BIT8), ACK not set (BIT7) → M2 or M4 */
+					if ((key_info & BIT(8)) && !(key_info & BIT(7))) {
+						printk("EAPOL-TRACE: drop reflected M%d key_info=0x%04x src=%pM — loop via brlan0 prevented\n",
+						       (key_info & BIT(9)) ? 4 : 2, key_info,
+						       hdr->addr2);
+						kfree(frm80211_msg->u.frm80211.u.frame.frame);
+						kfree(frm80211_msg);
+						return;
+					}
+				}
+			}
 			msg_ops_type = wlan_emu_frm80211_ops_type_eapol;
 		}
 	}
