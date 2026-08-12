@@ -1933,11 +1933,11 @@ static void mac80211_hwsim_tx(struct ieee80211_hw *hw,
 	bool ack;
 	enum nl80211_chan_width confbw = NL80211_CHAN_WIDTH_20_NOHT;
 	u32 _portid, i;
+	struct ethhdr *eth_hdr;
 
 	rdkfmac_eapol_trace_80211("TX M2", "mac80211-driver", skb->data,
-					   skb->len, data->hw->wiphy->dev.name, false);
+					   skb->len, NULL, false);
 
-	struct ethhdr *eth_hdr;
 	eth_hdr = (void *)skb->data;
 
 	if (ieee80211_is_probe_req(hdr->frame_control) || ieee80211_is_auth(hdr->frame_control) ||
@@ -2044,7 +2044,7 @@ static void mac80211_hwsim_tx(struct ieee80211_hw *hw,
 	if (_portid) {
 		rdkfmac_eapol_trace_80211("TX M2 forwarded", "wmediumd",
 					   skb->data, skb->len,
-					   data->hw->wiphy->dev.name, false);
+					   NULL, false);
 		return mac80211_hwsim_tx_frame_nl(hw, skb, _portid, channel);
 	}
 
@@ -2054,7 +2054,7 @@ static void mac80211_hwsim_tx(struct ieee80211_hw *hw,
 	ack = mac80211_hwsim_tx_frame_no_nl(hw, skb, channel);
 	rdkfmac_eapol_trace_80211("TX M2 fanout", "simulated-medium",
 					   skb->data, skb->len,
-					   data->hw->wiphy->dev.name, false);
+					   NULL, false);
 
 	/* forward EAPOL cross-box only; skip if Path A already delivered (ack=true) */
 	if (!ack &&
@@ -2084,7 +2084,7 @@ static void mac80211_hwsim_tx(struct ieee80211_hw *hw,
 		txi->flags |= IEEE80211_TX_STAT_ACK;
 	rdkfmac_eapol_trace_80211(ack ? "TX M2 complete" : "TX M2 dropped",
 					   "mac80211-driver", skb->data, skb->len,
-					   data->hw->wiphy->dev.name, false);
+					   NULL, false);
 	ieee80211_tx_status_irqsafe(hw, skb);
 }
 
