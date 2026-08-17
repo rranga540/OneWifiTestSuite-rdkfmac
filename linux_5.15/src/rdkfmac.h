@@ -466,8 +466,14 @@ typedef enum {
 	STA_STATE_AUTH_RESP_RECEIVED,
 	STA_STATE_ASSOC_REQ_SENT,
 	STA_STATE_ASSOC_RESP_RECEIVED,
-	STA_STATE_EAPOL,
+	STA_STATE_EAPOL,	/* generic EAPOL (kept for backward compatibility)   */
+	STA_STATE_EAPOL_M1,	/* M1 received from AP  (ANonce, ACK)                */
+	STA_STATE_EAPOL_M2,	/* M2 sent by STA       (SNonce + MIC)               */
+	STA_STATE_EAPOL_M3,	/* M3 received from AP  (Install + ACK + MIC)        */
+	STA_STATE_EAPOL_M4,	/* M4 sent by STA       (MIC + Secure, final ACK)    */
 	STA_STATE_CONNECTED,
+	STA_STATE_DISASSOC,	/* event state: disassociation TX or RX              */
+	STA_STATE_DEAUTH,	/* event state: deauthentication TX or RX            */
 	STA_STATE_FAILED,
 } sta_conn_state_t;
 
@@ -561,6 +567,14 @@ struct mac80211_rdkfmac_data {
 	int auth_req_len;
 	int op_modes;
 	sta_conn_state_t sta_conn_state;
+	/* EAPOL 4-way handshake tracking (per STA); observability + dup detection.
+	 * *_sent gate the M2/M4 state transition (not the TX itself), replay holds
+	 * the last M1/M3 Replay Counter so a fresh handshake/rekey is detectable.
+	 */
+	bool eapol_m2_sent;
+	bool eapol_m4_sent;
+	u64  eapol_last_m1_replay;
+	u64  eapol_last_m3_replay;
 };
 
 int update_auth_req(char *frame, size_t frame_len);

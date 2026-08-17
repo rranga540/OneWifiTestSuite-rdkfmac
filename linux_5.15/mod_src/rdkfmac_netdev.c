@@ -167,6 +167,61 @@ void rdkfmac_eapol_trace_ethernet(const char *stage, const char *path,
 					   frame + ETH_HLEN, frame_len - ETH_HLEN,
 					   frame_len, ifname, count_event);
 }
+
+/* Classify an EAPOL-Key frame carried inside an 802.11 data frame as M1..M4
+ * from the Key Information bits (Install=BIT6, ACK=BIT7, MIC=BIT8, Secure=BIT9),
+ * matching rdkfmac_eapol_trace_fields(). Returns 0 if not an EAPOL-Key frame.
+ * On success (1..4) *replay_out receives the 64-bit Replay Counter.
+ */
+static u8 rdkfmac_eapol_classify_80211(const u8 *frame, unsigned int frame_len,
+				       u64 *replay_out)
+{
+	const struct ieee80211_hdr *hdr;
+	const u8 *llc, *eapol;
+	unsigned int hdr_len, eapol_avail;
+	u16 key_info;
+	u64 replay;
+	u8 message = 0;
+
+	if (replay_out)
+		*replay_out = 0;
+	if (!frame || frame_len < sizeof(*hdr))
+		return 0;
+	hdr = (const struct ieee80211_hdr *)frame;
+	hdr_len = ieee80211_hdrlen(hdr->frame_control);
+	if (hdr_len > frame_len || frame_len - hdr_len < 8)
+		return 0;
+	llc = frame + hdr_len;
+	if (llc[0] != 0xaa || llc[1] != 0xaa || llc[2] != 0x03 ||
+	    llc[3] != 0x00 || llc[4] != 0x00 || llc[5] != 0x00 ||
+	    llc[6] != 0x88 || llc[7] != 0x8e)
+		return 0;
+	eapol = llc + 8;
+	eapol_avail = frame_len - hdr_len - 8;
+	if (eapol_avail < 25 || eapol[1] != 3)
+		return 0;
+	key_info = ((u16)eapol[5] << 8) | eapol[6];
+	replay = ((u64)eapol[9] << 56) | ((u64)eapol[10] << 48) |
+		 ((u64)eapol[11] << 40) | ((u64)eapol[12] << 32) |
+		 ((u64)eapol[13] << 24) | ((u64)eapol[14] << 16) |
+		 ((u64)eapol[15] << 8) | eapol[16];
+
+	if ((key_info & BIT(7)) && !(key_info & BIT(8)))
+		message = 1;
+	else if (!(key_info & BIT(7)) && (key_info & BIT(8)) &&
+		 !(key_info & BIT(6)) && !(key_info & BIT(9)))
+		message = 2;
+	else if ((key_info & BIT(6)) && (key_info & BIT(7)) &&
+		 (key_info & BIT(8)))
+		message = 3;
+	else if (!(key_info & BIT(7)) && (key_info & BIT(8)) &&
+		 (key_info & BIT(9)))
+		message = 4;
+
+	if (replay_out)
+		*replay_out = replay;
+	return message;
+}
 #include "rdkfmac_cmd.h"
 #include "rdkfmac_cfg80211.h"
 #include "wlan_emu_msg_data.h"
@@ -1024,7 +1079,13 @@ static const char *sta_conn_state_name(sta_conn_state_t s)
 	case STA_STATE_ASSOC_REQ_SENT:		return "ASSOC_REQ_SENT";
 	case STA_STATE_ASSOC_RESP_RECEIVED:	return "ASSOC_RESP_RECEIVED";
 	case STA_STATE_EAPOL:			return "EAPOL";
+	case STA_STATE_EAPOL_M1:		return "EAPOL_M1";
+	case STA_STATE_EAPOL_M2:		return "EAPOL_M2";
+	case STA_STATE_EAPOL_M3:		return "EAPOL_M3";
+	case STA_STATE_EAPOL_M4:		return "EAPOL_M4";
 	case STA_STATE_CONNECTED:		return "CONNECTED";
+	case STA_STATE_DISASSOC:		return "DISASSOC";
+	case STA_STATE_DEAUTH:			return "DEAUTH";
 	case STA_STATE_FAILED:			return "FAILED";
 	default:				return "UNKNOWN";
 	}
@@ -1046,12 +1107,16 @@ static void sta_conn_state_transition(struct mac80211_rdkfmac_data *ctx,
 	if (old_state == new_state)
 		return;
 
-	/* Backward moves are unexpected except an explicit reset/failure; keep
-	 * the last good state visible instead of overwriting it.
+	/* Backward moves are unexpected except an explicit reset/failure or an
+	 * event/rekey state (DEAUTH/DISASSOC can fire from any state; EAPOL_M1
+	 * can restart a handshake on rekey); keep the last good state otherwise.
 	 */
 	if (new_state < old_state &&
 	    new_state != STA_STATE_IDLE &&
-	    new_state != STA_STATE_FAILED) {
+	    new_state != STA_STATE_FAILED &&
+	    new_state != STA_STATE_DEAUTH &&
+	    new_state != STA_STATE_DISASSOC &&
+	    new_state != STA_STATE_EAPOL_M1) {
 		printk(KERN_INFO
 		       "STA-STATE sta=%pM ctx=%p %s -> %s reason=%s UNEXPECTED-BACKWARD\n",
 		       ctx->addresses[1].addr, ctx,
@@ -1065,6 +1130,27 @@ static void sta_conn_state_transition(struct mac80211_rdkfmac_data *ctx,
 	       ctx->addresses[1].addr, ctx,
 	       sta_conn_state_name(old_state),
 	       sta_conn_state_name(new_state), reason);
+}
+
+/* Clear per-STA EAPOL handshake tracking so a stale handshake cannot leak into
+ * a new connection. Call on new auth/assoc, fresh M1, rekey, deauth, disassoc.
+ */
+static void sta_eapol_reset(struct mac80211_rdkfmac_data *ctx, const char *reason)
+{
+	if (!ctx)
+		return;
+	if (ctx->eapol_m2_sent || ctx->eapol_m4_sent ||
+	    ctx->eapol_last_m1_replay || ctx->eapol_last_m3_replay)
+		printk(KERN_INFO
+		       "EAPOL-RESET sta=%pM ctx=%p reason=%s m2_sent=%d m4_sent=%d "
+		       "last_m1_replay=%llu last_m3_replay=%llu\n",
+		       ctx->addresses[1].addr, ctx, reason,
+		       ctx->eapol_m2_sent, ctx->eapol_m4_sent,
+		       ctx->eapol_last_m1_replay, ctx->eapol_last_m3_replay);
+	ctx->eapol_m2_sent = false;
+	ctx->eapol_m4_sent = false;
+	ctx->eapol_last_m1_replay = 0;
+	ctx->eapol_last_m3_replay = 0;
 }
 
 static netdev_tx_t hwsim_mon_xmit(struct sk_buff *skb,
@@ -1158,13 +1244,78 @@ static netdev_tx_t hwsim_mon_xmit(struct sk_buff *skb,
 			else if (ieee80211_is_assoc_resp(hdr80211->frame_control))
 				sta_conn_state_transition(nic, STA_STATE_ASSOC_RESP_RECEIVED,
 							  "assoc-response-rx");
+			else if (ieee80211_is_deauth(hdr80211->frame_control)) {
+				struct ieee80211_mgmt *m = (void *)hdr80211;
+				u16 rc = le16_to_cpu(m->u.deauth.reason_code);
+				printk(KERN_INFO
+				       "STA-STATE sta=%pM ctx=%p %s -> DEAUTH direction=RX "
+				       "reason_code=%u source=%pM destination=%pM "
+				       "origin=peer eapol_reset=yes func=%s\n",
+				       nic->addresses[1].addr, nic,
+				       sta_conn_state_name(nic->sta_conn_state), rc,
+				       hdr80211->addr2, hdr80211->addr1, __func__);
+				sta_eapol_reset(nic, "deauth-rx");
+				sta_conn_state_transition(nic, STA_STATE_DEAUTH, "deauth-rx");
+				sta_conn_state_transition(nic, STA_STATE_IDLE, "post-deauth-idle");
+			}
+			else if (ieee80211_is_disassoc(hdr80211->frame_control)) {
+				struct ieee80211_mgmt *m = (void *)hdr80211;
+				u16 rc = le16_to_cpu(m->u.disassoc.reason_code);
+				printk(KERN_INFO
+				       "STA-STATE sta=%pM ctx=%p %s -> DISASSOC direction=RX "
+				       "reason_code=%u source=%pM destination=%pM "
+				       "origin=peer eapol_reset=yes func=%s\n",
+				       nic->addresses[1].addr, nic,
+				       sta_conn_state_name(nic->sta_conn_state), rc,
+				       hdr80211->addr2, hdr80211->addr1, __func__);
+				sta_eapol_reset(nic, "disassoc-rx");
+				sta_conn_state_transition(nic, STA_STATE_DISASSOC, "disassoc-rx");
+				sta_conn_state_transition(nic, STA_STATE_IDLE, "post-disassoc-idle");
+			}
 			else if (ieee80211_is_data(hdr80211->frame_control)) {
-				int _hl = ieee80211_hdrlen(hdr80211->frame_control);
-				u8 *_p = (u8 *)hdr80211;
-				if (nskb->len >= _hl + 8 &&
-				    _p[_hl + 6] == 0x88 && _p[_hl + 7] == 0x8e)
-					sta_conn_state_transition(nic, STA_STATE_EAPOL,
-								  "eapol-rx");
+				u64 replay = 0;
+				u8 msg = rdkfmac_eapol_classify_80211((u8 *)hdr80211,
+								      nskb->len, &replay);
+				if (msg == 1) {
+					/* Fresh M1 (new Replay Counter) begins a handshake
+					 * attempt: clear m2_sent so the matching M2 is
+					 * allowed. A repeated M1 is a retransmit -> log only.
+					 */
+					if (replay != nic->eapol_last_m1_replay) {
+						nic->eapol_last_m1_replay = replay;
+						nic->eapol_m2_sent = false;
+						sta_conn_state_transition(nic, STA_STATE_EAPOL_M1,
+									  "eapol-m1-rx");
+					} else {
+						printk(KERN_INFO
+						       "EAPOL-DUP sta=%pM msg=M1 replay=%llu "
+						       "action=%s func=%s\n",
+						       nic->addresses[1].addr, replay,
+						       nic->eapol_m2_sent ? "SKIP_M2" : "ALLOW_M2",
+						       __func__);
+					}
+				} else if (msg == 3) {
+					if (replay != nic->eapol_last_m3_replay) {
+						nic->eapol_last_m3_replay = replay;
+						nic->eapol_m4_sent = false;
+						sta_conn_state_transition(nic, STA_STATE_EAPOL_M3,
+									  "eapol-m3-rx");
+					} else {
+						printk(KERN_INFO
+						       "EAPOL-DUP sta=%pM msg=M3 replay=%llu "
+						       "action=%s func=%s\n",
+						       nic->addresses[1].addr, replay,
+						       nic->eapol_m4_sent ? "SKIP_M4" : "ALLOW_M4",
+						       __func__);
+					}
+				} else {
+					int _hl = ieee80211_hdrlen(hdr80211->frame_control);
+					u8 *_p = (u8 *)hdr80211;
+					if (nskb->len >= _hl + 8 &&
+					    _p[_hl + 6] == 0x88 && _p[_hl + 7] == 0x8e)
+						sta_conn_state_transition(nic, STA_STATE_EAPOL,
+									  "eapol-rx");
+				}
 			}
 		}
 
@@ -2030,12 +2181,42 @@ static void mac80211_hwsim_tx(struct ieee80211_hw *hw,
 			       hdr->addr2, hdr->addr1, data,
 			       data->assoc_req ? "present" : "MISSING");
 
-		if (ieee80211_is_auth(hdr->frame_control))
+		if (ieee80211_is_auth(hdr->frame_control)) {
+			sta_eapol_reset(data, "auth-request-tx");
 			sta_conn_state_transition(data, STA_STATE_AUTH_REQ_SENT,
 						  "auth-request-tx");
+		}
 		else if (ieee80211_is_assoc_req(hdr->frame_control))
 			sta_conn_state_transition(data, STA_STATE_ASSOC_REQ_SENT,
 						  "assoc-request-tx");
+		else if (ieee80211_is_deauth(hdr->frame_control)) {
+			struct ieee80211_mgmt *m = (void *)hdr;
+			u16 rc = le16_to_cpu(m->u.deauth.reason_code);
+			printk(KERN_INFO
+			       "STA-STATE sta=%pM ctx=%p %s -> DEAUTH direction=TX "
+			       "reason_code=%u source=%pM destination=%pM "
+			       "origin=local eapol_reset=yes func=%s\n",
+			       data->addresses[1].addr, data,
+			       sta_conn_state_name(data->sta_conn_state), rc,
+			       hdr->addr2, hdr->addr1, __func__);
+			sta_eapol_reset(data, "deauth-tx");
+			sta_conn_state_transition(data, STA_STATE_DEAUTH, "deauth-tx");
+			sta_conn_state_transition(data, STA_STATE_IDLE, "post-deauth-idle");
+		}
+		else if (ieee80211_is_disassoc(hdr->frame_control)) {
+			struct ieee80211_mgmt *m = (void *)hdr;
+			u16 rc = le16_to_cpu(m->u.disassoc.reason_code);
+			printk(KERN_INFO
+			       "STA-STATE sta=%pM ctx=%p %s -> DISASSOC direction=TX "
+			       "reason_code=%u source=%pM destination=%pM "
+			       "origin=local eapol_reset=yes func=%s\n",
+			       data->addresses[1].addr, data,
+			       sta_conn_state_name(data->sta_conn_state), rc,
+			       hdr->addr2, hdr->addr1, __func__);
+			sta_eapol_reset(data, "disassoc-tx");
+			sta_conn_state_transition(data, STA_STATE_DISASSOC, "disassoc-tx");
+			sta_conn_state_transition(data, STA_STATE_IDLE, "post-disassoc-idle");
+		}
 
 		send_eth_frame(skb->data, skb->len, data);
 		send_eth_frame_hook(skb->data, skb->len, data);
@@ -2158,7 +2339,40 @@ static void mac80211_hwsim_tx(struct ieee80211_hw *hw,
 		u8 *_p = (u8 *)hdr;
 		if (skb->len >= _hlen + 8 &&
 		    _p[_hlen + 6] == 0x88 && _p[_hlen + 7] == 0x8e) {
-			sta_conn_state_transition(data, STA_STATE_EAPOL, "eapol-tx");
+			u64 replay = 0;
+			u8 msg = rdkfmac_eapol_classify_80211((u8 *)hdr, skb->len,
+							      &replay);
+			/* Observability + duplicate detection only. The frame is always
+			 * forwarded so legitimate wpa_supplicant retransmissions are
+			 * preserved; the *_sent flag only gates the state transition.
+			 */
+			if (msg == 2) {
+				if (!data->eapol_m2_sent) {
+					data->eapol_m2_sent = true;
+					sta_conn_state_transition(data, STA_STATE_EAPOL_M2,
+								  "eapol-m2-tx");
+				} else {
+					printk(KERN_INFO
+					       "EAPOL-DUP sta=%pM msg=M2 replay=%llu "
+					       "action=RETX_FORWARD func=%s\n",
+					       data->addresses[1].addr, replay, __func__);
+					return;
+				}
+			} else if (msg == 4) {
+				if (!data->eapol_m4_sent) {
+					data->eapol_m4_sent = true;
+					sta_conn_state_transition(data, STA_STATE_EAPOL_M4,
+								  "eapol-m4-tx");
+				} else {
+					printk(KERN_INFO
+					       "EAPOL-DUP sta=%pM msg=M4 replay=%llu "
+					       "action=RETX_FORWARD func=%s\n",
+					       data->addresses[1].addr, replay, __func__);
+					return;
+				}
+			} else {
+				sta_conn_state_transition(data, STA_STATE_EAPOL, "eapol-tx");
+			}
 			send_data_frame(skb->data, skb->len, hw);
 		}
 	}
@@ -4310,6 +4524,7 @@ int update_sta_new_mac(mac_update_t *mac_update)
 		printk("%s:%d new mac update : %pM with bridge:%s\n", __func__, __LINE__, mac_update->new_mac, data2->bridge_name);
 		spin_unlock_bh(&hwsim_radio_lock);
 
+		sta_eapol_reset(data2, "mac-update");
 		sta_conn_state_transition(data2, STA_STATE_MAC_UPDATED, "mac-update");
 
 		return 0;
