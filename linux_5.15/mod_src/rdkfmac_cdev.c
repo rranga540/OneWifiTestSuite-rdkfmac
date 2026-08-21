@@ -10,10 +10,6 @@ static wlan_emu_msg_data_t *pop_from_char_device(void);
 static unsigned int get_list_entries_count_in_char_device(void);
 static bool  rdkfmac_emu80211_close = true;
 
-extern void rdkfmac_eapol_trace_80211(const char *stage, const char *path,
-					      const u8 *frame, unsigned int frame_len,
-					      const char *ifname, bool count_event);
-
 const char *rdkfmac_cfg80211_ops_type_to_string(wlan_emu_cfg80211_ops_type_t type)
 {
 #define CFG80211_TO_S(x) case x: return #x;
@@ -88,7 +84,6 @@ void push_to_char_device(wlan_emu_msg_data_t *data)
 	wlan_emu_msg_data_t	*spec;
 	char	str_spec_type[32];
 	char	str_ops[128];
-	struct ieee80211_hdr *dbg_hdr;
 
 	// do not push to list if nobody is listening
 	if (g_char_device.num_inst == 0) {
@@ -137,18 +132,6 @@ void push_to_char_device(wlan_emu_msg_data_t *data)
 	(spec->type != wlan_emu_msg_type_agent)) {
 		printk("%s:%d: pushing data to queue, type: %s ops: %s current size: %d\n", __func__, __LINE__,
 			str_spec_type, str_ops, get_list_entries_count_in_char_device());
-	}
-
-	/* Debug: log EAPOL frames entering shared queue with dest MAC for multi-client tracing */
-	if (spec->type == wlan_emu_msg_type_frm80211 &&
-	    spec->u.frm80211.ops == wlan_emu_frm80211_ops_type_eapol &&
-	    spec->u.frm80211.u.frame.frame_len >= 24) {
-		dbg_hdr = (struct ieee80211_hdr *)spec->u.frm80211.u.frame.frame;
-		printk("EAPOL-QUEUE: PUSH dst=%pM src=%pM len=%u instances=%d qsize=%d\n",
-		       dbg_hdr->addr1, dbg_hdr->addr2,
-		       spec->u.frm80211.u.frame.frame_len,
-		       g_char_device.num_inst,
-		       get_list_entries_count_in_char_device());
 	}
 
 	list_add(&entry->list_entry, g_char_device.list_tail);
@@ -426,11 +409,6 @@ static void handle_frm80211_msg_w(char *read_buff, size_t size) {
 
 	//updating the final correct value
 	memcpy(&frm80211_msg->u.frm80211.ops, &msg_ops_type, sizeof(wlan_emu_cfg80211_ops_type_t));
-	if (msg_ops_type == wlan_emu_frm80211_ops_type_eapol)
-		rdkfmac_eapol_trace_80211("RX M2 userspace write", "char-device/userspace",
-					   frm80211_msg->u.frm80211.u.frame.frame,
-					   frm80211_msg->u.frm80211.u.frame.frame_len,
-					   "rdkfmac", false);
 
 	push_to_char_device(frm80211_msg);
 	kfree(frm80211_msg);
@@ -711,17 +689,6 @@ static void handle_frame(wlan_emu_msg_data_t *spec, ssize_t *len, u8 *s_tmp)
 	*len += sizeof(wlan_emu_frm80211_ops_type_t);
 
 	printk("%s:%d Frame len is %d ops is %d\n", __func__, __LINE__, spec->u.frm80211.u.frame.frame_len, spec->u.frm80211.ops);
-	if (spec->u.frm80211.ops == wlan_emu_frm80211_ops_type_eapol) {
-		struct ieee80211_hdr *rd_hdr = (struct ieee80211_hdr *)spec->u.frm80211.u.frame.frame;
-		printk("EAPOL-QUEUE: POP dst=%pM src=%pM len=%u reader_pid=%d instances=%d\n",
-		       rd_hdr->addr1, rd_hdr->addr2,
-		       spec->u.frm80211.u.frame.frame_len,
-		       current->pid, g_char_device.num_inst);
-		rdkfmac_eapol_trace_80211("RX processing", "char-device/dequeue",
-					   spec->u.frm80211.u.frame.frame,
-					   spec->u.frm80211.u.frame.frame_len,
-					   "rdkfmac", false);
-	}
 	memcpy(s_tmp, &spec->u.frm80211.u.frame.frame_len, sizeof(unsigned int));
 	s_tmp += sizeof(unsigned int);
 	*len += sizeof(unsigned int);
@@ -837,9 +804,7 @@ static int rdkfmac_open(struct inode *inode, struct file *file)
 {
 
 	g_char_device.num_inst++;
-	printk(KERN_INFO "EAPOL-QUEUE: OPEN instances=%d pid=%d qsize=%d\n",
-	       g_char_device.num_inst, current->pid,
-	       get_list_entries_count_in_char_device());
+	printk(KERN_INFO "%s:%d Opened Instances: %d\n", __func__, __LINE__, g_char_device.num_inst);
 
 	return 0;
 }
@@ -850,10 +815,8 @@ static int rdkfmac_release(struct inode *inode, struct file *file)
 		g_char_device.num_inst--;
 	}
 
-	printk(KERN_INFO "EAPOL-QUEUE: CLOSE instances=%d pid=%d qsize=%d\n",
-	       g_char_device.num_inst, current->pid,
-	       get_list_entries_count_in_char_device());
-	return 0;
+	    printk(KERN_INFO "%s:%d Opened Instances: %d\n", __func__, __LINE__, g_char_device.num_inst);
+	    return 0;
 }
 
 const struct file_operations rdkfmac_fops = {

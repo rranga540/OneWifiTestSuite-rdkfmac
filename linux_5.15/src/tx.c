@@ -37,13 +37,6 @@
 #include "wme.h"
 #include "rate.h"
 
-extern void rdkfmac_eapol_trace_80211(const char *stage, const char *path,
-					      const u8 *frame, unsigned int frame_len,
-					      const char *ifname, bool count_event);
-extern void rdkfmac_eapol_trace_ethernet(const char *stage, const char *path,
-						const u8 *frame, unsigned int frame_len,
-						const char *ifname, bool count_event);
-
 /* misc utils */
 
 static __le16 ieee80211_duration(struct ieee80211_tx_data *tx,
@@ -1786,20 +1779,16 @@ int send_data_frame(void *buff, uint32_t frame_size, struct ieee80211_hw *hw)
 	static int rssi, noise;
 	struct mac80211_rdkfmac_data *rdkfmac_data = hw->priv;
 
-	rdkfmac_eapol_trace_80211("TX M2 bridge-forward", "cross-box",
-					   buff, frame_size, rdkfmac_data->bridge_name,
-					   false);
-
 	dev = dev_get_by_name(&init_net, rdkfmac_data->bridge_name);
 	if (dev == NULL ) {
-	printk("EAPOL-TRACE: TX M2 dropped stage=cross-box reason=bridge-missing\n");
+	printk("no such device eth0\n");
 	return 1;
 	}
 
 	skb = alloc_skb(ETH_HLEN + frame_size + sizeof(u8aRadiotapHeader), GFP_ATOMIC);
 
 	if (skb == NULL) {
-	printk("EAPOL-TRACE: TX M2 dropped stage=cross-box reason=skb-alloc\n");
+	printk("failed alloc skb\n");
 	return 1;
 	}
 
@@ -1842,8 +1831,6 @@ static bool ieee80211_tx(struct ieee80211_sub_if_data *sdata,
 	bool result = true;
 
 	if (unlikely(skb->len < 10)) {
-		rdkfmac_eapol_trace_80211("TX M2 dropped", "mac80211-tx",
-					   skb->data, skb->len, sdata->name, false);
 		dev_kfree_skb(skb);
 		return true;
 	}
@@ -1858,13 +1845,9 @@ static bool ieee80211_tx(struct ieee80211_sub_if_data *sdata,
 	res_prepare = ieee80211_tx_prepare(sdata, &tx, sta, skb);
 
 	if (unlikely(res_prepare == TX_DROP)) {
-		rdkfmac_eapol_trace_80211("TX M2 dropped", "tx-prepare",
-					   skb->data, skb->len, sdata->name, false);
 		ieee80211_free_txskb(&local->hw, skb);
 		return true;
 	} else if (unlikely(res_prepare == TX_QUEUED)) {
-		rdkfmac_eapol_trace_80211("TX M2 queued", "tx-prepare",
-					   skb->data, skb->len, sdata->name, false);
 		return true;
 	}
 
@@ -1874,26 +1857,16 @@ static bool ieee80211_tx(struct ieee80211_sub_if_data *sdata,
 		info->hw_queue =
 			sdata->vif.hw_queue[skb_get_queue_mapping(skb)];
 
-	rdkfmac_eapol_trace_80211("TX M2 processing", "tx-handlers-early",
-					   tx.skb ? tx.skb->data : NULL,
-					   tx.skb ? tx.skb->len : 0, sdata->name, false);
-	if (invoke_tx_handlers_early(&tx)) {
-		printk("EAPOL-TRACE: TX M2 dropped stage=tx-handlers-early\n");
+	if (invoke_tx_handlers_early(&tx))
 		return true;
-	}
 
 	hdr = (void *)tx.skb->data;
 
 	if (ieee80211_queue_skb(local, sdata, tx.sta, tx.skb))
 		return true;
 
-	rdkfmac_eapol_trace_80211("TX M2 processing", "tx-handlers-late",
-					   tx.skb ? tx.skb->data : NULL,
-					   tx.skb ? tx.skb->len : 0, sdata->name, false);
 	if (!invoke_tx_handlers_late(&tx))
 		result = __ieee80211_tx(local, &tx.skbs, tx.sta, txpending);
-	else
-		printk("EAPOL-TRACE: TX M2 dropped stage=tx-handlers-late\n");
 
 	return result;
 }
@@ -3731,9 +3704,6 @@ void __ieee80211_subif_start_xmit(struct sk_buff *skb,
 	struct sk_buff *next;
 	int len = skb->len;
 
-	rdkfmac_eapol_trace_ethernet("TX M2 ingress", "netdev/bridge",
-					     skb->data, skb->len, dev->name, true);
-
 	if (unlikely(skb->len < ETH_HLEN)) {
 		kfree_skb(skb);
 		return;
@@ -3818,9 +3788,6 @@ void __ieee80211_subif_start_xmit(struct sk_buff *skb,
 			kfree_skb_list(next);
 			goto out;
 		}
-
-		rdkfmac_eapol_trace_80211("TX M2 80211 build", "mac80211-tx",
-					   skb->data, skb->len, sdata->name, false);
 
 		dev_sw_netstats_tx_add(dev, 1, skb->len);
 
