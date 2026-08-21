@@ -1202,15 +1202,11 @@ static netdev_tx_t hwsim_mon_xmit(struct sk_buff *skb,
 	list_for_each_entry(nic, &hwsim_radios, list) {
 		struct sk_buff *nskb;
 		struct ieee80211_rx_status rx_status = {0};
-		if(nic->idle || !nic->started || !nic->channel) {
-			if (hdr80211 && !is_multicast_ether_addr(hdr80211->addr1) &&
-			    mac80211_hwsim_addr_match(nic, hdr80211->addr1))
+		if (nic->idle || !nic->started || !nic->channel)
 			continue;
-		}
 		if (hdr80211 && !is_multicast_ether_addr(hdr80211->addr1) &&
-		    !mac80211_hwsim_addr_match(nic, hdr80211->addr1)) {
+		    !mac80211_hwsim_addr_match(nic, hdr80211->addr1))
 			continue;
-		}
 		nskb = skb_copy(skb, GFP_ATOMIC);
 		if(nskb == NULL)
 			continue;
@@ -1223,29 +1219,11 @@ static netdev_tx_t hwsim_mon_xmit(struct sk_buff *skb,
 				sta_conn_state_transition(nic, STA_STATE_ASSOC_RESP_RECEIVED,
 							  "assoc-response-rx");
 			else if (ieee80211_is_deauth(hdr80211->frame_control)) {
-				struct ieee80211_mgmt *m = (void *)hdr80211;
-				u16 rc = le16_to_cpu(m->u.deauth.reason_code);
-				printk(KERN_INFO
-				       "STA-STATE sta=%pM ctx=%p %s -> DEAUTH direction=RX "
-				       "reason_code=%u source=%pM destination=%pM "
-				       "origin=peer eapol_reset=yes func=%s\n",
-				       nic->addresses[1].addr, nic,
-				       sta_conn_state_name(nic->sta_conn_state), rc,
-				       hdr80211->addr2, hdr80211->addr1, __func__);
 				sta_eapol_reset(nic, "deauth-rx");
 				sta_conn_state_transition(nic, STA_STATE_DEAUTH, "deauth-rx");
 				sta_conn_state_transition(nic, STA_STATE_IDLE, "post-deauth-idle");
 			}
 			else if (ieee80211_is_disassoc(hdr80211->frame_control)) {
-				struct ieee80211_mgmt *m = (void *)hdr80211;
-				u16 rc = le16_to_cpu(m->u.disassoc.reason_code);
-				printk(KERN_INFO
-				       "STA-STATE sta=%pM ctx=%p %s -> DISASSOC direction=RX "
-				       "reason_code=%u source=%pM destination=%pM "
-				       "origin=peer eapol_reset=yes func=%s\n",
-				       nic->addresses[1].addr, nic,
-				       sta_conn_state_name(nic->sta_conn_state), rc,
-				       hdr80211->addr2, hdr80211->addr1, __func__);
 				sta_eapol_reset(nic, "disassoc-rx");
 				sta_conn_state_transition(nic, STA_STATE_DISASSOC, "disassoc-rx");
 				sta_conn_state_transition(nic, STA_STATE_IDLE, "post-disassoc-idle");
@@ -2149,15 +2127,11 @@ static void mac80211_hwsim_tx(struct ieee80211_hw *hw,
 			sta_conn_state_transition(data, STA_STATE_ASSOC_REQ_SENT,
 						  "assoc-request-tx");
 		else if (ieee80211_is_deauth(hdr->frame_control)) {
-			struct ieee80211_mgmt *m = (void *)hdr;
-			u16 rc = le16_to_cpu(m->u.deauth.reason_code);
 			sta_eapol_reset(data, "deauth-tx");
 			sta_conn_state_transition(data, STA_STATE_DEAUTH, "deauth-tx");
 			sta_conn_state_transition(data, STA_STATE_IDLE, "post-deauth-idle");
 		}
 		else if (ieee80211_is_disassoc(hdr->frame_control)) {
-			struct ieee80211_mgmt *m = (void *)hdr;
-			u16 rc = le16_to_cpu(m->u.disassoc.reason_code);
 			sta_eapol_reset(data, "disassoc-tx");
 			sta_conn_state_transition(data, STA_STATE_DISASSOC, "disassoc-tx");
 			sta_conn_state_transition(data, STA_STATE_IDLE, "post-disassoc-idle");
