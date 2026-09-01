@@ -2093,7 +2093,7 @@ extern int send_data_frame(void *buff, uint32_t frame_size, struct ieee80211_hw 
  * per-STA inactivity window (Broadcom scb->used ages out in ~10-28s,
  * observed to vary with dispatch-thread load).
  */
-#define RDKFMAC_KEEPALIVE_MS 5000
+#define RDKFMAC_KEEPALIVE_MS 10000
 
 /*
  * rdkfmac_keepalive_work - periodic per-STA keepalive.
