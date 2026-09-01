@@ -576,15 +576,23 @@ struct mac80211_rdkfmac_data {
 	u64  eapol_last_m1_replay;
 	u64  eapol_last_m3_replay;
 
-	/* Periodic QoS-Null keepalive (per STA): once the 4-way handshake
-	 * completes we transmit a directed QoS data frame to the AP every
+	/* Periodic keepalive (per STA): once the 4-way handshake completes we
+	 * transmit a directed Probe Request (management frame, sent in the
+	 * clear even on an RSN-protected BSS) to the AP every
 	 * RDKFMAC_KEEPALIVE_MS so the AP's per-STA inactivity timer
 	 * (Broadcom scb->used) stays refreshed and the client is not deauthed
-	 * with reason_code=4. Addresses are captured when EAPOL-M4 is sent.
+	 * with reason_code=4. A QoS-Null (data-frame) keepalive was tried
+	 * first but is dropped by the AP's hardware decrypt-status gate
+	 * before it ever reaches SCB_UPDATE_USED, because a raw-injected data
+	 * frame cannot carry a valid CCMP MIC/PN for the negotiated PTK.
+	 * Probe Requests need no encryption, so they avoid that problem.
+	 * Addresses + SSID are captured when EAPOL-M4 is sent.
 	 */
 	struct delayed_work keepalive_work;
 	u8   keepalive_bssid[ETH_ALEN];
 	u8   keepalive_sta[ETH_ALEN];
+	u8   keepalive_ssid[32];
+	u8   keepalive_ssid_len;
 };
 
 int update_auth_req(char *frame, size_t frame_len);

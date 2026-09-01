@@ -2089,8 +2089,9 @@ int send_eth_frame_hook(void *frame, uint32_t frame_size, struct mac80211_rdkfma
 
 extern int send_data_frame(void *buff, uint32_t frame_size, struct ieee80211_hw *hw);
 
-/* Interval of the per-STA QoS-Null keepalive. Must stay comfortably below the
- * AP's per-STA inactivity window (Broadcom scb->used ages out in ~10-20s).
+/* Interval of the per-STA keepalive. Must stay comfortably below the AP's
+ * per-STA inactivity window (Broadcom scb->used ages out in ~10-28s,
+ * observed to vary with dispatch-thread load).
  */
 #define RDKFMAC_KEEPALIVE_MS 5000
 
@@ -2098,18 +2099,27 @@ extern int send_data_frame(void *buff, uint32_t frame_size, struct ieee80211_hw 
  * rdkfmac_keepalive_work - periodic per-STA keepalive.
  *
  * While the client is fully connected (4-way handshake done: EAPOL-M4 sent),
- * transmit a directed QoS-Null (type=Data, subtype=QoS-Null) to the AP via the
- * real OTA path send_data_frame(). Because addr1 == AP BSSID (unicast to the
- * AP), at the AP wlc_recvdata() evaluates tome==TRUE and calls
+ * transmit a directed Probe Request (type=Mgmt, subtype=Probe-Req) to the AP
+ * via the real OTA path send_eth_frame(). Because addr1 == AP BSSID (unicast
+ * to the AP), at the AP wlc_recvdata()/mgmt RX evaluates tome==TRUE and calls
  * SCB_UPDATE_USED(wlc, scb) -> scb->used = now, refreshing the inactivity
- * timer. This runs independently per radio, so no client can starve another.
+ * timer -- the same mechanism the AP's own "sent probe request for our SSID"
+ * log line confirms already works for genuine STA probes. Unlike a QoS-Null
+ * (data frame), a Probe Request is a management frame and is accepted by the
+ * AP unencrypted even on an RSN-protected BSS, so it is not silently dropped
+ * by the hardware decrypt-status gate the way a raw-injected data frame is.
+ * This runs independently per radio, so no client can starve another.
  */
 static void rdkfmac_keepalive_work(struct work_struct *work)
 {
 	struct mac80211_rdkfmac_data *data =
 		container_of(to_delayed_work(work),
 			     struct mac80211_rdkfmac_data, keepalive_work);
-	struct ieee80211_qos_hdr qn;
+	u8 buf[24 + 2 + 32 + 2 + 8]; /* hdr + SSID IE + Supported Rates IE */
+	struct ieee80211_mgmt *preq = (struct ieee80211_mgmt *)buf;
+	static const u8 supp_rates[] = { 0x82, 0x84, 0x8b, 0x96 }; /* 1,2,5.5,11 basic */
+	u8 *pos;
+	size_t frame_len;
 
 	/* Check: only keep transmitting while the radio is up and the STA is
 	 * connected (handshake completed and not torn down). On deauth/disassoc
@@ -2121,22 +2131,34 @@ static void rdkfmac_keepalive_work(struct work_struct *work)
 	    data->sta_conn_state > STA_STATE_CONNECTED)
 		return;
 
-	memset(&qn, 0, sizeof(qn));
-	qn.frame_control = cpu_to_le16(IEEE80211_FTYPE_DATA |
-				       IEEE80211_STYPE_QOS_NULLFUNC |
-				       IEEE80211_FCTL_TODS);
-	qn.duration_id = 0;
-	memcpy(qn.addr1, data->keepalive_bssid, ETH_ALEN); /* RA/DA = AP BSSID */
-	memcpy(qn.addr2, data->keepalive_sta,   ETH_ALEN); /* TA/SA = STA      */
-	memcpy(qn.addr3, data->keepalive_bssid, ETH_ALEN); /* DA (ToDS)        */
-	qn.seq_ctrl = 0;
-	qn.qos_ctrl = 0;
+	memset(buf, 0, sizeof(buf));
+	preq->frame_control = cpu_to_le16(IEEE80211_FTYPE_MGMT |
+					   IEEE80211_STYPE_PROBE_REQ);
+	preq->duration = 0;
+	memcpy(preq->da,    data->keepalive_bssid, ETH_ALEN); /* directed at AP */
+	memcpy(preq->sa,    data->keepalive_sta,   ETH_ALEN);
+	memcpy(preq->bssid, data->keepalive_bssid, ETH_ALEN);
+	preq->seq_ctrl = 0;
 
-	send_data_frame(&qn, sizeof(qn), data->hw);
+	pos = preq->u.probe_req.variable;
+	*pos++ = WLAN_EID_SSID;
+	*pos++ = data->keepalive_ssid_len;
+	memcpy(pos, data->keepalive_ssid, data->keepalive_ssid_len);
+	pos += data->keepalive_ssid_len;
+
+	*pos++ = WLAN_EID_SUPP_RATES;
+	*pos++ = sizeof(supp_rates);
+	memcpy(pos, supp_rates, sizeof(supp_rates));
+	pos += sizeof(supp_rates);
+
+	frame_len = pos - buf;
+
+	send_eth_frame(buf, frame_len, data);
 
 	schedule_delayed_work(&data->keepalive_work,
 			      msecs_to_jiffies(RDKFMAC_KEEPALIVE_MS));
 }
+
 
 static void mac80211_hwsim_tx(struct ieee80211_hw *hw,
 				struct ieee80211_tx_control *control,
@@ -2321,12 +2343,33 @@ static void mac80211_hwsim_tx(struct ieee80211_hw *hw,
 					data->eapol_m4_sent = true;
 					sta_conn_state_transition(data, STA_STATE_EAPOL_M4,
 								  "eapol-m4-tx");
-					/* Handshake complete: capture the AP BSSID (addr1)
-					 * and STA MAC (addr2) from this M4 frame and start
-					 * the periodic QoS-Null keepalive to the AP.
+					/* Handshake complete: capture the AP BSSID (addr1),
+					 * STA MAC (addr2), and AP SSID (from the stored
+					 * assoc_req template) and start the periodic
+					 * Probe Request keepalive to the AP.
 					 */
 					memcpy(data->keepalive_bssid, hdr->addr1, ETH_ALEN);
 					memcpy(data->keepalive_sta,   hdr->addr2, ETH_ALEN);
+					if (data->assoc_req &&
+					    data->assoc_req_len >
+						sizeof(struct ieee80211_hdr_3addr) + 4) {
+						struct ieee80211_mgmt *t_mgmt =
+							(struct ieee80211_mgmt *)data->assoc_req;
+						size_t var_len = data->assoc_req_len -
+							sizeof(struct ieee80211_hdr_3addr);
+						const struct element *ssid_elem =
+							get_tlv(t_mgmt->u.assoc_req.variable,
+								var_len, WLAN_EID_SSID);
+						if (ssid_elem &&
+						    ssid_elem->datalen <=
+							sizeof(data->keepalive_ssid)) {
+							memcpy(data->keepalive_ssid,
+							       ssid_elem->data,
+							       ssid_elem->datalen);
+							data->keepalive_ssid_len =
+								ssid_elem->datalen;
+						}
+					}
 					schedule_delayed_work(&data->keepalive_work,
 						msecs_to_jiffies(RDKFMAC_KEEPALIVE_MS));
 				} else {
