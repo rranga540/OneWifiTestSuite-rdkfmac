@@ -575,6 +575,16 @@ struct mac80211_rdkfmac_data {
 	bool eapol_m4_sent;
 	u64  eapol_last_m1_replay;
 	u64  eapol_last_m3_replay;
+
+	/* Periodic QoS-Null keepalive (per STA): once the 4-way handshake
+	 * completes we transmit a directed QoS data frame to the AP every
+	 * RDKFMAC_KEEPALIVE_MS so the AP's per-STA inactivity timer
+	 * (Broadcom scb->used) stays refreshed and the client is not deauthed
+	 * with reason_code=4. Addresses are captured when EAPOL-M4 is sent.
+	 */
+	struct delayed_work keepalive_work;
+	u8   keepalive_bssid[ETH_ALEN];
+	u8   keepalive_sta[ETH_ALEN];
 };
 
 int update_auth_req(char *frame, size_t frame_len);

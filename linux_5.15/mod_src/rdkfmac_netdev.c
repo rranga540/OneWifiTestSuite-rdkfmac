@@ -2089,6 +2089,55 @@ int send_eth_frame_hook(void *frame, uint32_t frame_size, struct mac80211_rdkfma
 
 extern int send_data_frame(void *buff, uint32_t frame_size, struct ieee80211_hw *hw);
 
+/* Interval of the per-STA QoS-Null keepalive. Must stay comfortably below the
+ * AP's per-STA inactivity window (Broadcom scb->used ages out in ~10-20s).
+ */
+#define RDKFMAC_KEEPALIVE_MS 5000
+
+/*
+ * rdkfmac_keepalive_work - periodic per-STA keepalive.
+ *
+ * While the client is fully connected (4-way handshake done: EAPOL-M4 sent),
+ * transmit a directed QoS-Null (type=Data, subtype=QoS-Null) to the AP via the
+ * real OTA path send_data_frame(). Because addr1 == AP BSSID (unicast to the
+ * AP), at the AP wlc_recvdata() evaluates tome==TRUE and calls
+ * SCB_UPDATE_USED(wlc, scb) -> scb->used = now, refreshing the inactivity
+ * timer. This runs independently per radio, so no client can starve another.
+ */
+static void rdkfmac_keepalive_work(struct work_struct *work)
+{
+	struct mac80211_rdkfmac_data *data =
+		container_of(to_delayed_work(work),
+			     struct mac80211_rdkfmac_data, keepalive_work);
+	struct ieee80211_qos_hdr qn;
+
+	/* Check: only keep transmitting while the radio is up and the STA is
+	 * connected (handshake completed and not torn down). On deauth/disassoc
+	 * the state machine returns to STA_STATE_IDLE, which fails this check and
+	 * stops the rescheduling loop.
+	 */
+	if (!data->started || data->idle ||
+	    data->sta_conn_state < STA_STATE_EAPOL_M4 ||
+	    data->sta_conn_state > STA_STATE_CONNECTED)
+		return;
+
+	memset(&qn, 0, sizeof(qn));
+	qn.frame_control = cpu_to_le16(IEEE80211_FTYPE_DATA |
+				       IEEE80211_STYPE_QOS_NULLFUNC |
+				       IEEE80211_FCTL_TODS);
+	qn.duration_id = 0;
+	memcpy(qn.addr1, data->keepalive_bssid, ETH_ALEN); /* RA/DA = AP BSSID */
+	memcpy(qn.addr2, data->keepalive_sta,   ETH_ALEN); /* TA/SA = STA      */
+	memcpy(qn.addr3, data->keepalive_bssid, ETH_ALEN); /* DA (ToDS)        */
+	qn.seq_ctrl = 0;
+	qn.qos_ctrl = 0;
+
+	send_data_frame(&qn, sizeof(qn), data->hw);
+
+	schedule_delayed_work(&data->keepalive_work,
+			      msecs_to_jiffies(RDKFMAC_KEEPALIVE_MS));
+}
+
 static void mac80211_hwsim_tx(struct ieee80211_hw *hw,
 				struct ieee80211_tx_control *control,
 				struct sk_buff *skb)
@@ -2272,6 +2321,14 @@ static void mac80211_hwsim_tx(struct ieee80211_hw *hw,
 					data->eapol_m4_sent = true;
 					sta_conn_state_transition(data, STA_STATE_EAPOL_M4,
 								  "eapol-m4-tx");
+					/* Handshake complete: capture the AP BSSID (addr1)
+					 * and STA MAC (addr2) from this M4 frame and start
+					 * the periodic QoS-Null keepalive to the AP.
+					 */
+					memcpy(data->keepalive_bssid, hdr->addr1, ETH_ALEN);
+					memcpy(data->keepalive_sta,   hdr->addr2, ETH_ALEN);
+					schedule_delayed_work(&data->keepalive_work,
+						msecs_to_jiffies(RDKFMAC_KEEPALIVE_MS));
 				} else {
 					return;
 				}
@@ -4022,6 +4079,7 @@ static int mac80211_hwsim_new_radio(struct genl_info *info,
 	INIT_DELAYED_WORK(&data->roc_start, hw_roc_start);
 	INIT_DELAYED_WORK(&data->roc_done, hw_roc_done);
 	INIT_DELAYED_WORK(&data->hw_scan, hw_scan_work);
+	INIT_DELAYED_WORK(&data->keepalive_work, rdkfmac_keepalive_work);
 
 	hw->queues = 5;
 	hw->offchannel_tx_hw_queue = 4;
@@ -4286,6 +4344,7 @@ static void mac80211_hwsim_del_radio(struct mac80211_rdkfmac_data *data,
 {
 	hwsim_mcast_del_radio(data->idx, hwname, info);
 	debugfs_remove_recursive(data->debugfs);
+	cancel_delayed_work_sync(&data->keepalive_work);
 	ieee80211_unregister_hw(data->hw);
 	device_release_driver(data->dev);
 	device_unregister(data->dev);
