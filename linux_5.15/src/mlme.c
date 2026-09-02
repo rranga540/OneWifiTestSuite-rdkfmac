@@ -69,22 +69,8 @@ MODULE_PARM_DESC(beacon_loss_count,
 /*
  * Time the connection can be idle before we probe
  * it to see if we can still talk to the AP.
- *
- * Was a fixed 15s compile-time constant. Lowered to a runtime-tunable 5s:
- * with 3 simulated clients sharing one hwsim_radio_lock and a single-threaded
- * CCI dispatch thread, a 15s gap between probes left too little margin
- * against the AP's own per-STA inactivity timeout (Broadcom scb->used),
- * causing spurious reason_code=4 deauths for whichever client's probe
- * happened to be delayed. 5s keeps the existing (already-working) Probe
- * Request/Probe Response exchange comfortably ahead of that deadline for
- * every client, without adding any new frame type.
- */
-static int conn_mon_idle_time = 5;
-module_param(conn_mon_idle_time, int, 0644);
-MODULE_PARM_DESC(conn_mon_idle_time,
-		 "Seconds the STA connection can be idle before probing the AP"
-		 " to check it is still alive (default 5, was a fixed 15s).");
-#define IEEE80211_CONNECTION_IDLE_TIME	(conn_mon_idle_time * HZ)
+*/
+#define IEEE80211_CONNECTION_IDLE_TIME	(15 * HZ)
 /*
  * Time we wait for a probe response after sending
  * a probe request because of beacon loss or for
